@@ -2,7 +2,7 @@
 
 格式参考 Keep a Changelog；版本号以 `packaging/identity.json` 为准。
 
-## [0.1.0.0] — 首个可用版本
+## [1.0.0.0] — 首个可用版本
 
 ### 新增
 
