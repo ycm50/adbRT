@@ -57,7 +57,7 @@
 #define IDC_BTN_ACTION3     3023
 #define IDC_BTN_UP          3024
 #define IDC_BTN_PAUSE       3025
-#define IDC_BTN_SAVE        3026
+#define IDC_BTN_SAVELOG     3026
 #define IDC_STATIC_PATH     3027
 #define IDD_TEXTVIEW        3003
 #define IDD_LISTVIEW        3004

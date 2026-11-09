@@ -42,7 +42,7 @@ std::wstring SelectedText(HWND list) {
 }
 
 // ============================================================ 只读文本窗口
-constexpr wchar_t* kTextWndClass = L"AdbRTTextView";
+constexpr const wchar_t* kTextWndClass = L"AdbRTTextView";
 
 struct TextWin {
     std::wstring title;
@@ -176,7 +176,7 @@ void ShowDeviceInfo(HWND parent) {
 // ------------------------------------------------------------- 已安装应用
 namespace {
 
-constexpr wchar_t* kAppsWndClass = L"AdbRTAppsView";
+constexpr const wchar_t* kAppsWndClass = L"AdbRTAppsView";
 
 struct AppsCtx {
     std::vector<std::wstring> packages;
@@ -324,7 +324,7 @@ void ShowPullApk(HWND parent) { ShowInstalledApps(parent); }
 // ------------------------------------------------------------- 文件浏览器
 namespace {
 
-constexpr wchar_t* kFilesWndClass = L"AdbRTFilesView";
+constexpr const wchar_t* kFilesWndClass = L"AdbRTFilesView";
 
 struct FilesCtx {
     std::wstring path = L"/sdcard";

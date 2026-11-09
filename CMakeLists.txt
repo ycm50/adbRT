@@ -32,6 +32,11 @@ if(DEFINED ENV{SOURCE_DATE_EPOCH})
 endif()
 
 option(ADB_WERROR       "把编译警告当错误" OFF)
+if(ADB_WERROR)
+  # CI 用它当门禁：本地默认 OFF 方便边写边调，推之前建议自己开一次
+  add_compile_options(-Werror)
+  message(STATUS "ADB_WERROR=ON：编译警告将导致构建失败")
+endif()
 option(ADB_BUILD_GUI    "构建 GUI 主程序 AdbRT.exe" ON)
 option(ADB_BUILD_TESTS  "构建无窗口核心单元测试并注册进 CTest" ON)
 
