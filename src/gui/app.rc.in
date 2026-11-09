@@ -4,6 +4,9 @@
 
 // 图标：与 packaging/assets 下同一份像素（矢量母版 adbrt.svg，由 tools/gen-icon.mjs 生成）
 // 路径在构建期由 CMake 注入（windres 以 .rc 所在目录为基准解析相对路径，注入绝对路径最稳）。
+// 应用清单：视觉样式 + DPI + 长路径（没有它 = Win95 灰控件）
+1 RT_MANIFEST "@ADB_MANIFEST@"
+
 IDI_ADBRT      ICON "@ADB_ICON_ICO@"
 
 VS_VERSION_INFO VERSIONINFO

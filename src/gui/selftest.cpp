@@ -135,6 +135,26 @@ int RunSelfTest(const std::wstring& reportPath) {
         }
     }
 
+    // ---- 双参数命令：flash 必须同时有分区与镜像两个参数 ----
+    {
+        const adb::CommandSpec* flash = adb::FindCommandByKey("fb.flash");
+        Check(flash != nullptr, L"找到 fb.flash");
+        if (flash) {
+            Check(flash->param2 == adb::ParamKind::ImageFile, L"fb.flash 有第二个参数（镜像文件）");
+            Check(flash->paramKey2 && std::string(flash->paramKey2) == "img", L"fb.flash 第二参数 key 正确");
+            adb::BuildInput in;
+            in.spec = flash;
+            in.toolExe = L"fastboot.exe";
+            in.params["part"] = L"boot_a";
+            in.params["img"] = L"C:\boot.img";
+            adb::BuiltCommand built;
+            adb::BuildError err;
+            bool ok = adb::BuildCommand(in, &built, &err);
+            Check(ok, L"fb.flash 双参数构造成功");
+            if (ok) CheckStr(built.display, L"flash boot_a C:\boot.img", L"fb.flash 命令行");
+        }
+    }
+
     // ---- 内置命令分派：命令表里每个 Internal 都必须有落点 ----
     {
         const char* kBuiltin[] = {

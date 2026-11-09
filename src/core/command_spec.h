@@ -83,6 +83,9 @@ struct CommandSpec {
     ParamKind       param;
     ParamSource     paramSource;
     const char*     paramKey;
+    ParamKind       param2;        // 第二条参数（如 flash 的镜像文件），None = 没有
+    ParamSource     paramSource2;
+    const char*     paramKey2;
     ExecKind        exec;
     const FlagSpec* flags;
     uint8_t         flagCount;
@@ -95,6 +98,8 @@ const CommandSpec* FindCommand(CommandId id);
 const CommandSpec* FindCommandByKey(std::string_view key);
 const FlagSpec*    FindFlag(const CommandSpec& spec, std::string_view key);
 const wchar_t*     CommandTitle(const CommandSpec& spec);
+const wchar_t*     ParamLabel(ParamKind kind);
+std::wstring       FlagLabel(const FlagSpec& flag);
 const wchar_t*     GroupName(GroupId g);
 const char*        GroupKey(GroupId g);
 const char*        DangerName(Danger d);

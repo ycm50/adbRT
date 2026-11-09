@@ -36,6 +36,7 @@ struct AppContext {
     std::wstring initialPath;      // 命令行传入的本地路径
     bool         fromApk = false;
     std::string  initialCommand;   // --open <key>：启动后直接执行这条内置命令
+    std::string  initialSelect;    // --select <key>：只选中，不执行
 };
 
 struct AppState {
@@ -50,6 +51,19 @@ struct AppState {
     HWND  hCancel = nullptr;
     HWND  hRefreshing = nullptr;
     HWND  btnFastboot = nullptr;
+    HWND  hSearch = nullptr;
+    HWND  hCmdTitle = nullptr;
+    HWND  hDanger = nullptr;
+    HWND  hHeader = nullptr;
+    HWND  hParamsLabel = nullptr;
+    HWND  hOutputLabel = nullptr;
+    HWND  hPreviewLabel = nullptr;
+    HWND  hSettings = nullptr;
+    HWND  hAbout = nullptr;
+    HWND  hClearOut = nullptr;
+    HWND  hSaveOut = nullptr;
+    HWND  hCopy = nullptr;
+    bool  treeDirty = false;
 
     const adb::CommandSpec* current = nullptr;
     std::vector<adb::DeviceEntry> devices;
@@ -90,6 +104,9 @@ bool CreateMainWindow(HINSTANCE hinst, const AppContext& ctx);
 void RefreshDevices(HWND hwnd, bool keepSelection);
 void SelectCommand(const adb::CommandSpec* spec);
 void UpdatePreview();
+void CopyPreviewToClipboard(HWND hwnd);
+void SaveOutputToFile(HWND hwnd);
+void LayoutChildren(HWND hwnd);
 void SetStatus(const wchar_t* text);
 bool CollectInput(adb::BuildInput* in, std::wstring* error);
 void StartRun();

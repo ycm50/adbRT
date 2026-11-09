@@ -62,3 +62,17 @@
 #define IDD_TEXTVIEW        3003
 #define IDD_LISTVIEW        3004
 #define IDD_LOGCAT          3005
+
+// 新版主窗口控件
+#define IDC_EDIT_SEARCH     3030
+#define IDC_BTN_SETTINGS    3031
+#define IDC_BTN_ABOUT       3032
+#define IDC_BTN_CLEAROUT    3033
+#define IDC_BTN_SAVEOUT     3034
+#define IDC_STATIC_CMDTITLE 3035
+#define IDC_STATIC_DANGER   3036
+#define IDC_STATIC_HEADERT  3037
+#define IDC_STATIC_PARAMS   3038
+#define IDC_STATIC_OUTPUT   3039
+#define IDC_STATIC_PREVIEW  3040
+#define IDC_PARAM_HOST_2    3041

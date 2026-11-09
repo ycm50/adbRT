@@ -84,6 +84,10 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int showCmd) {
             return adbgui::RunUninstall(removePath, desktop, quiet);
         }
         if (a == L"--adb" && i + 1 < argc) { tempAdb = argv[++i]; continue; }
+        if (a == L"--select" && i + 1 < argc) {
+            ctx.initialSelect = adb::WideToUtf8(argv[++i]);
+            continue;
+        }
         if (a == L"--open" && i + 1 < argc) {
             ctx.initialCommand = adb::WideToUtf8(argv[++i]);
             continue;

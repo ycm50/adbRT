@@ -24,6 +24,35 @@ struct CtrlRef {
 
 std::vector<CtrlRef> g_params;
 std::vector<CtrlRef> g_flags;
+WNDPROC g_oldParamProc = nullptr;
+
+// 参数区的"浏览…"按钮：需要它时按 kind 打开文件 / 目录对话框
+void BrowseForParam(HWND host, adb::ParamKind kind, bool second) {
+    if (g_params.empty()) return;
+    HWND edit = (second && g_params.size() > 1) ? g_params[1].hwnd : g_params.front().hwnd;
+    if (kind == adb::ParamKind::ImageFile) {
+        std::wstring f = AskFile(host, L"选择镜像文件", L"镜像文件\0*.img;*.bin\0所有文件\0*.*\0");
+        if (!f.empty()) SetTextOf(edit, f);
+    } else if (kind == adb::ParamKind::LocalPaths) {
+        std::wstring d = AskFolder(host, L"选择目录");
+        if (!d.empty()) SetTextOf(edit, d);
+    } else {
+        std::wstring f = AskFile(host, L"选择文件", L"APK\0*.apk\0所有文件\0*.*\0");
+        if (!f.empty()) SetTextOf(edit, f);
+    }
+}
+
+LRESULT CALLBACK ParamHostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_COMMAND && HIWORD(wp) == BN_CLICKED &&
+        (LOWORD(wp) == IDC_BTN_ACTION1 || LOWORD(wp) == IDC_BTN_ACTION2)) {
+        const bool second = LOWORD(wp) == IDC_BTN_ACTION2;
+        adb::ParamKind kind = adb::ParamKind::ApkFile;
+        if (g_app.current) kind = second ? g_app.current->param2 : g_app.current->param;
+        BrowseForParam(hwnd, kind, second);
+        return 0;
+    }
+    return ::CallWindowProcW(g_oldParamProc, hwnd, msg, wp, lp);
+}
 
 HWND MakeLabel(HWND host, const std::wstring& text, int x, int y, int w, int height) {
     HWND label = ::CreateWindowExW(0, L"STATIC", text.c_str(), WS_CHILD | WS_VISIBLE | SS_LEFT,
@@ -72,6 +101,10 @@ void BuildParamPanel(HWND host, const adb::CommandSpec* spec) {
     g_params.clear();
     g_flags.clear();
 
+    if (!g_oldParamProc)
+        g_oldParamProc = reinterpret_cast<WNDPROC>(::SetWindowLongPtrW(host, GWLP_WNDPROC,
+            reinterpret_cast<LONG_PTR>(ParamHostProc)));
+
     if (!spec) return;
 
     int y = 0;
@@ -80,21 +113,7 @@ void BuildParamPanel(HWND host, const adb::CommandSpec* spec) {
 
     // ---- 参数（按 kind 决定控件） ----
     if (spec->param != adb::ParamKind::None && spec->paramKey) {
-        std::wstring label;
-        switch (spec->param) {
-            case adb::ParamKind::ApkFile:     label = L"APK 文件"; break;
-            case adb::ParamKind::LocalPaths:  label = L"本地路径"; break;
-            case adb::ParamKind::RemotePath:  label = L"设备路径（如 /sdcard/Download）"; break;
-            case adb::ParamKind::PackageName: label = L"应用包名"; break;
-            case adb::ParamKind::Partition:   label = L"分区名"; break;
-            case adb::ParamKind::ImageFile:   label = L"镜像文件"; break;
-            case adb::ParamKind::HostPort:    label = L"地址（IP:端口）"; break;
-            case adb::ParamKind::Port:        label = L"端口"; break;
-            case adb::ParamKind::ShellCommand:label = L"命令"; break;
-            case adb::ParamKind::KeyCode:     label = L"按键"; break;
-            case adb::ParamKind::SlotName:    label = L"槽位（a / b）"; break;
-            default:                          label = adb::Utf8ToWide(spec->paramKey); break;
-        }
+        std::wstring label = adb::ParamLabel(spec->param);
         MakeLabel(host, label, left, y, width, 18);
         y += 20;
 
@@ -108,18 +127,37 @@ void BuildParamPanel(HWND host, const adb::CommandSpec* spec) {
 
         HWND browse = ::CreateWindowExW(0, L"BUTTON", L"浏览…", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                         left + width - 64, y, 64, 24, host,
-                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BTN_BROWSE_ADB)),
+                                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BTN_ACTION1)),
                                         nullptr, nullptr);
         ApplyFont(browse, g_app.font);
-        (void)browse;
+        y += 32;
+    }
+
+    // ---- 第二条参数（如 flash 的镜像文件） ----
+    if (spec->param2 != adb::ParamKind::None && spec->paramKey2) {
+        MakeLabel(host, adb::ParamLabel(spec->param2), left, y, width, 18);
+        y += 20;
+        HWND edit2 = ::CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                       WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                       left, y, width - 70, 24, host,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_PARAM_HOST_2)),
+                                       nullptr, nullptr);
+        ApplyFont(edit2, g_app.fontMono);
+        g_params.push_back({edit2, spec->paramKey2, spec->param2, adb::FlagKind::Value});
+        HWND browse2 = ::CreateWindowExW(0, L"BUTTON", L"浏览…", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                         left + width - 64, y, 64, 24, host,
+                                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BTN_ACTION2)),
+                                         nullptr, nullptr);
+        ApplyFont(browse2, g_app.font);
         y += 32;
     }
 
     // ---- flags ----
     for (uint8_t i = 0; i < spec->flagCount; ++i) {
         const adb::FlagSpec& f = spec->flags[i];
+        std::wstring flagLabel = adb::FlagLabel(f);
         if (f.kind == adb::FlagKind::Value) {
-            MakeLabel(host, adb::Utf8ToWide(f.key), left, y, width, 18);
+            MakeLabel(host, flagLabel, left, y, width, 18);
             y += 20;
             HWND edit = ::CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                                           WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
@@ -128,7 +166,7 @@ void BuildParamPanel(HWND host, const adb::CommandSpec* spec) {
             g_flags.push_back({edit, f.key, adb::ParamKind::None, f.kind});
             y += 30;
         } else {
-            HWND chk = ::CreateWindowExW(0, L"BUTTON", adb::Utf8ToWide(f.key).c_str(),
+            HWND chk = ::CreateWindowExW(0, L"BUTTON", flagLabel.c_str(),
                                          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                                          left, y, width, 22, host, nullptr, nullptr, nullptr);
             ApplyFont(chk, g_app.font);

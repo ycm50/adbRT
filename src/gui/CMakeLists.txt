@@ -1,7 +1,8 @@
 # AdbRT.exe —— Win32 GUI（-mwindows，无控制台）
 set(ADB_GUI_SOURCES
   main.cpp
-  window.cpp
+  main_window.cpp
+  theme.cpp
   param_panel.cpp
   task.cpp
   selftest.cpp
@@ -18,6 +19,7 @@ set(ADB_GUI_SOURCES
 set(ADB_ASSET_DIR "${CMAKE_SOURCE_DIR}/packaging/assets")
 set(ADB_ICON_ICO "${ADB_ASSET_DIR}/adbrt.ico")
 set(ADB_ICON_PNG "${ADB_ASSET_DIR}/adbrt-256.png")
+set(ADB_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/app.manifest")
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/app.rc.in"
                "${CMAKE_CURRENT_BINARY_DIR}/app.rc" @ONLY)
 

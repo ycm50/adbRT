@@ -47,8 +47,11 @@ constexpr FlagSpec kLogcatFlags[] = {
 constexpr CommandSpec C(CommandId id, const char* key, GroupId g, uint16_t title,
                         SelMask sel, bool dev, bool fb, Danger dg,
                         ParamKind pk, ParamSource ps, const char* pkey,
-                        ExecKind ex, const FlagSpec* fl, uint8_t fn, const char* tmpl) {
-    return CommandSpec{id, key, g, title, 0, sel, dev, fb, dg, pk, ps, pkey, ex, fl, fn, tmpl};
+                        ExecKind ex, const FlagSpec* fl, uint8_t fn, const char* tmpl,
+                        ParamKind pk2 = ParamKind::None, ParamSource ps2 = ParamSource::None,
+                        const char* pkey2 = nullptr) {
+    return CommandSpec{id, key, g, title, 0, sel, dev, fb, dg, pk, ps, pkey,
+                       pk2, ps2, pkey2, ex, fl, fn, tmpl};
 }
 
 }  // namespace
@@ -181,7 +184,7 @@ static const CommandSpec kCommands[] = {
       "set_active {slot}"),
     C(1506, "fb.flash", GroupId::Fastboot, 0, kSelNone, false, true, Danger::Breaker,
       ParamKind::Partition, ParamSource::Partitions, "part", ExecKind::CliPanel, nullptr, 0,
-      "flash {part} {img}"),
+      "flash {part} {img}", ParamKind::ImageFile, ParamSource::None, "img"),
     C(1507, "fb.erase", GroupId::Fastboot, 0, kSelNone, false, true, Danger::Breaker,
       ParamKind::Partition, ParamSource::Partitions, "part", ExecKind::CliPanel, nullptr, 0,
       "erase {part}"),
@@ -292,6 +295,51 @@ const wchar_t* CommandTitle(const CommandSpec& spec) {
     for (const auto& e : kTitles)
         if (std::strcmp(e.key, spec.key) == 0) return e.title;
     return L"(未命名命令)";
+}
+
+const wchar_t* ParamLabel(ParamKind kind) {
+    switch (kind) {
+        case ParamKind::ApkFile:      return L"APK 文件";
+        case ParamKind::LocalPaths:   return L"本地路径";
+        case ParamKind::RemotePath:   return L"设备路径（如 /sdcard/Download）";
+        case ParamKind::PackageName:  return L"应用包名";
+        case ParamKind::ActivityName: return L"组件名（包/类）";
+        case ParamKind::HostPort:     return L"地址（IP:端口）";
+        case ParamKind::PairCode:     return L"配对码";
+        case ParamKind::Partition:    return L"分区名";
+        case ParamKind::ImageFile:    return L"镜像文件";
+        case ParamKind::ShellCommand: return L"命令";
+        case ParamKind::Text:         return L"文本";
+        case ParamKind::Url:          return L"地址";
+        case ParamKind::KeyCode:      return L"按键";
+        case ParamKind::Permission:   return L"权限名";
+        case ParamKind::PropKey:      return L"属性名";
+        case ParamKind::UserId:       return L"用户 ID";
+        case ParamKind::SlotName:     return L"槽位（a / b）";
+        case ParamKind::Port:         return L"端口";
+        default:                      return L"参数";
+    }
+}
+
+std::wstring FlagLabel(const FlagSpec& f) {
+    struct Entry { const char* key; const wchar_t* label; };
+    static const Entry kFlags[] = {
+        {"replace",   L"覆盖安装 (-r)"},
+        {"grant",     L"授予全部权限 (-g)"},
+        {"downgrade", L"允许降级 (-d)"},
+        {"testonly",  L"允许测试包 (-t)"},
+        {"keep",      L"保留数据 (-k)"},
+        {"sync",      L"只推有变化的 (--sync)"},
+        {"preserve",  L"保留时间戳 (-a)"},
+        {"clear",     L"先清空缓冲 (--clear)"},
+        {"size",      L"分辨率（如 1280x720）"},
+        {"bitrate",   L"码率（如 8M）"},
+        {"timelimit", L"时长上限（秒，最长 180）"},
+        {"target",    L"目标（recovery / bootloader / 留空=系统）"},
+    };
+    for (const auto& e : kFlags)
+        if (std::strcmp(e.key, f.key) == 0) return e.label;
+    return Utf8ToWide(f.key);
 }
 
 const wchar_t* GroupName(GroupId g) {
