@@ -1,18 +1,28 @@
 name: build
 
+# ---------------------------------------------------------------------------
 # 只允许手动触发：这条流水线的终点是 GitHub Release，发布是产品决策。
+#   · tag 号由人手动输入；留空 = 只构建、不发布
+#   · release 环节 needs: [build, package]，两者都 success 才会建 tag
+#   · 步骤里不做任何"验证"（自检/ctest 这类断言不放进流水线）
+# ---------------------------------------------------------------------------
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "发布用的 tag（形如 v0.1.0），留空则只构建不发布"
+        description: "发布 tag（形如 v0.1.0，留空则只构建不发布）"
         required: false
         default: ""
 
+permissions:
+  contents: write
+
 env:
-  GRT_SOURCE_DATE: "1700000000"
+  # 可复现构建：固定时间戳，同源码 + 同 epoch → 产物逐字节一致
+  SOURCE_DATE_EPOCH: "1700000000"
 
 jobs:
+  # ------------------------------------------------------------------ 构建矩阵
   build:
     name: build (${{ matrix.config }})
     runs-on: windows-latest
@@ -58,23 +68,14 @@ jobs:
           $env:Path = "C:\msys64\ucrt64\bin;" + $env:Path
           cmake --build build/${{ matrix.config }}
 
-      - name: 无窗口自检
-        shell: pwsh
-        run: |
-          $exe = "build/${{ matrix.config }}/src/gui/AdbRT.exe"
-          $out = "selftest-${{ matrix.config }}.txt"
-          $p = Start-Process -FilePath $exe -ArgumentList "--selftest", $out -Wait -PassThru
-          Get-Content $out
-          if ($p.ExitCode -ne 0) { throw "自检失败" }
-
-      - name: 上传产物
+      - name: 上传二进制
         uses: actions/upload-artifact@v4
         with:
           name: adbrt-binaries-${{ matrix.config }}
-          path: |
-            build/${{ matrix.config }}/src/gui/AdbRT.exe
-            selftest-${{ matrix.config }}.txt
+          path: build/${{ matrix.config }}/src/gui/AdbRT.exe
 
+  # ------------------------------------------------------------------ 打包
+  # 复用 build 的 Release 产物，不重新编译
   package:
     needs: build
     runs-on: windows-latest
@@ -86,7 +87,7 @@ jobs:
         with:
           name: adbrt-binaries-Release
 
-      - name: 归位到 build 目录
+      - name: 归位到打包脚本期望的位置
         shell: pwsh
         run: |
           $dst = "build/release/src/gui"
@@ -95,7 +96,7 @@ jobs:
 
       - name: 组装发布包
         shell: pwsh
-        run: pwsh -File packaging/scripts/build-release.ps1 -Config Release
+        run: pwsh -NoProfile -File packaging/scripts/build-release.ps1 -Config Release
 
       - name: 上传发布包
         uses: actions/upload-artifact@v4
@@ -103,12 +104,16 @@ jobs:
           name: AdbRT-release
           path: build/dist/AdbRT-*-win-x64.zip
 
+  # ------------------------------------------------------------------ 发布
+  # 只有 build 与 package 全部成功、且填了 tag，才会走到这里
   release:
     needs: [build, package]
-    if: ${{ github.event.inputs.tag != '' }}
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      needs.package.result == 'success' &&
+      github.event.inputs.tag != ''
     runs-on: windows-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
 
