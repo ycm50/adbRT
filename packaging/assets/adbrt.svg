@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- adbRT 应用图标（矢量母版）。位图由 tools/gen-icon 用同一份几何定义生成，保证 SVG 与 PNG/ICO 完全一致。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="1" stop-color="#1d4ed8"/></linearGradient></defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#g)"/>
+  <rect x="256" y="424" width="512" height="344" rx="172" ry="172" fill="#ffffff"/>
+  <line x1="372" y1="430" x2="306" y2="322" stroke="#ffffff" stroke-width="46" stroke-linecap="round"/>
+  <line x1="652" y1="430" x2="718" y2="322" stroke="#ffffff" stroke-width="46" stroke-linecap="round"/>
+  <circle cx="400" cy="566" r="52" fill="#1d4ed8"/>
+  <circle cx="624" cy="566" r="52" fill="#1d4ed8"/>
+  </svg>

@@ -1,0 +1,136 @@
+name: build
+
+# 只允许手动触发：这条流水线的终点是 GitHub Release，发布是产品决策。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "发布用的 tag（形如 v0.1.0），留空则只构建不发布"
+        required: false
+        default: ""
+
+env:
+  GRT_SOURCE_DATE: "1700000000"
+
+jobs:
+  build:
+    name: build (${{ matrix.config }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 MSYS2 UCRT64 工具链
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-ccache
+
+      - name: 缓存 ccache
+        uses: actions/cache@v4
+        with:
+          path: C:\msys64\home\runneradmin\.ccache
+          key: ccache-${{ matrix.config }}-${{ hashFiles('src/**') }}
+          restore-keys: ccache-${{ matrix.config }}-
+
+      - name: 配置
+        shell: pwsh
+        run: |
+          $env:Path = "C:\msys64\ucrt64\bin;" + $env:Path
+          cmake -S . -B build/${{ matrix.config }} -G Ninja `
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }} `
+            -DADB_WERROR=ON `
+            -DCMAKE_C_COMPILER=C:/msys64/ucrt64/bin/gcc.exe `
+            -DCMAKE_CXX_COMPILER=C:/msys64/ucrt64/bin/g++.exe `
+            -DCMAKE_RC_COMPILER=C:/msys64/ucrt64/bin/windres.exe
+
+      - name: 构建
+        shell: pwsh
+        run: |
+          $env:Path = "C:\msys64\ucrt64\bin;" + $env:Path
+          cmake --build build/${{ matrix.config }}
+
+      - name: 无窗口自检
+        shell: pwsh
+        run: |
+          $exe = "build/${{ matrix.config }}/src/gui/AdbRT.exe"
+          $out = "selftest-${{ matrix.config }}.txt"
+          $p = Start-Process -FilePath $exe -ArgumentList "--selftest", $out -Wait -PassThru
+          Get-Content $out
+          if ($p.ExitCode -ne 0) { throw "自检失败" }
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: adbrt-binaries-${{ matrix.config }}
+          path: |
+            build/${{ matrix.config }}/src/gui/AdbRT.exe
+            selftest-${{ matrix.config }}.txt
+
+  package:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取回 Release 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: adbrt-binaries-Release
+
+      - name: 归位到 build 目录
+        shell: pwsh
+        run: |
+          $dst = "build/release/src/gui"
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item "AdbRT.exe" (Join-Path $dst "AdbRT.exe") -Force
+
+      - name: 组装发布包
+        shell: pwsh
+        run: pwsh -File packaging/scripts/build-release.ps1 -Config Release
+
+      - name: 上传发布包
+        uses: actions/upload-artifact@v4
+        with:
+          name: AdbRT-release
+          path: build/dist/AdbRT-*-win-x64.zip
+
+  release:
+    needs: [build, package]
+    if: ${{ github.event.inputs.tag != '' }}
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取回发布包
+        uses: actions/download-artifact@v4
+        with:
+          name: AdbRT-release
+          path: dist
+
+      - name: 创建 / 覆盖 tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag }}"
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git tag -f $tag
+          git push origin "refs/tags/$tag" --force
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag }}
+          name: ${{ github.event.inputs.tag }}
+          files: dist/AdbRT-*-win-x64.zip
+          fail_on_unmatched_files: true

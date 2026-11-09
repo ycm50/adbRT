@@ -1,0 +1,11 @@
+build/
+dist/
+*.zip
+*.obj
+*.o
+*.a
+*.exe
+*.user
+.vs/
+.cache/
+tmpscripts/

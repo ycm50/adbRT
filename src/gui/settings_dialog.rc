@@ -1,0 +1,27 @@
+#include <windows.h>
+#include "resource.h"
+
+IDD_SETTINGS DIALOGEX 0, 0, 320, 210
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "设置"
+FONT 9, "Microsoft YaHei UI", 400, 0, 1
+BEGIN
+    LTEXT   "adb 路径（可填绝对路径、相对程序目录的路径，或用环境变量）", -1, 10, 8, 300, 10
+    EDITTEXT IDC_EDIT_ADB, 10, 20, 250, 14, ES_AUTOHSCROLL
+    PUSHBUTTON "...", IDC_BTN_BROWSE_ADB, 266, 20, 44, 14
+
+    LTEXT   "fastboot 路径", -1, 10, 40, 300, 10
+    EDITTEXT IDC_EDIT_FASTBOOT, 10, 52, 250, 14, ES_AUTOHSCROLL
+    PUSHBUTTON "...", IDC_BTN_BROWSE_FB, 266, 52, 44, 14
+
+    LTEXT   "例：A:\\platform-tools\\adb.exe    或    .\\platform-tools\\adb.exe    或    %%LOCALAPPDATA%%\\Android\\Sdk\\platform-tools\\adb.exe", -1, 10, 72, 300, 20
+
+    AUTOCHECKBOX "显示 Fastboot（专家模式）：刷写/擦除/解锁会修改设备，可能变砖", IDC_CHK_EXPERT, 10, 96, 300, 12
+
+    LTEXT   "安装/卸载相关", -1, 10, 118, 300, 10
+    AUTOCHECKBOX "安装时把目录加入用户 PATH（卸载时移除）", IDC_CHK_PATHENV, 10, 130, 300, 10
+    AUTOCHECKBOX "创建桌面快捷方式", IDC_CHK_DESKTOP, 10, 144, 300, 10
+
+    DEFPUSHBUTTON "保存", IDC_BTN_SAVE, 196, 182, 55, 18
+    PUSHBUTTON "取消", IDC_BTN_CANCEL2, 258, 182, 55, 18
+END

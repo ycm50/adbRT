@@ -1,0 +1,8 @@
+#pragma once
+// 由 cmake/identity.cmake 从 packaging/identity.json 生成，不要手改
+#define ADB_PRODUCT_NAME  "@ADB_ID_PRODUCT@"
+#define ADB_VERSION_STR   "@ADB_ID_VERSION@"
+#define ADB_VERSION_COMMA @ADB_ID_VERSION_COMMA@
+#define ADB_COMPANY_NAME  "@ADB_ID_COMPANY@"
+#define ADB_EXE_NAME      "@ADB_ID_EXE@"
+#define ADB_DESCRIPTION   "@ADB_ID_DESCRIPTION@"
