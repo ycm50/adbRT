@@ -14,5 +14,6 @@ void  ScrollToEnd(HWND edit);
 std::wstring GetDpiScaledFontName();
 
 int   ScaleForDpi(HWND hwnd, int value);
+std::wstring Trim(const std::wstring& s);
 
 }  // namespace adbgui

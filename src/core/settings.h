@@ -60,6 +60,10 @@ public:
     std::wstring DetectFastboot();
 };
 
+// 命令行 --adb 的临时覆盖（不写配置文件，进程退出即失效）
+void SetTransientAdbOverride(const std::wstring& path);
+void ClearTransientAdbOverride();
+
 // 手写 JSON 取值（零第三方依赖）
 namespace json {
 std::string GetString(const std::string& text, const std::string& key, const std::string& def);

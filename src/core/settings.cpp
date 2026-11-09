@@ -293,7 +293,15 @@ void Settings::SetFastbootSpec(const std::wstring& spec) {
     SetString(kKeyFastboot, WideToUtf8(spec));
 }
 
+namespace {
+std::wstring g_transientAdb;
+}
+
+void SetTransientAdbOverride(const std::wstring& path) { g_transientAdb = path; }
+void ClearTransientAdbOverride() { g_transientAdb.clear(); }
+
 std::wstring Settings::AdbPath() const {
+    if (!g_transientAdb.empty()) return g_transientAdb;
     std::wstring spec = AdbSpec();
     if (!spec.empty()) {
         std::wstring resolved = ResolveAgainstExeDir(spec);

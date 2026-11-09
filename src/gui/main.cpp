@@ -83,6 +83,10 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int showCmd) {
             return adbgui::RunUninstall(removePath, desktop, quiet);
         }
         if (a == L"--adb" && i + 1 < argc) { tempAdb = argv[++i]; continue; }
+        if (a == L"--open" && i + 1 < argc) {
+            ctx.initialCommand = adb::WideToUtf8(argv[++i]);
+            continue;
+        }
         if (!a.empty() && a[0] != L'-') {
             ctx.initialPath = a;
             std::wstring lower = adb::ToLowerAscii(adb::FileNameOf(a));
@@ -91,10 +95,8 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int showCmd) {
     }
     if (argv) ::LocalFree(argv);
 
-    if (!tempAdb.empty()) {
-        adb::Settings::Instance().SetAdbSpec(tempAdb);
-        adb::Settings::Instance().Save();
-    }
+    // --adb 只临时生效，不落盘（避免测桩把用户配置改掉）
+    if (!tempAdb.empty()) adb::SetTransientAdbOverride(tempAdb);
 
     if (!selftestPath.empty()) {
         int rc = adbgui::RunSelfTest(selftestPath);

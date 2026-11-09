@@ -8,3 +8,9 @@ target_include_directories(AdbRT.CoreTests PRIVATE
 target_link_libraries(AdbRT.CoreTests PRIVATE adbrt_core)
 
 add_test(NAME core_tests COMMAND AdbRT.CoreTests)
+# adb 桩：端到端测试用（不依赖真机）
+# MinGW 下 wmain 需要 -municode，否则链接器找的是窄字符 WinMain
+add_executable(fake-adb fake_adb.cpp)
+if(MINGW)
+  target_link_options(fake-adb PRIVATE -municode)
+endif()

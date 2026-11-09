@@ -298,6 +298,9 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_COMMAND:
             OnCommand(hwnd, LOWORD(wp), HIWORD(wp), reinterpret_cast<HWND>(lp));
             return 0;
+        case WM_APP_TASK_START:
+            StartRun();
+            return 0;
         case WM_NOTIFY: {
             auto* nm = reinterpret_cast<LPNMHDR>(lp);
             if (nm->idFrom == IDC_TREE_COMMANDS && nm->code == TVN_SELCHANGEDW) {
@@ -370,6 +373,15 @@ bool CreateMainWindow(HINSTANCE hinst, const AppContext& ctx) {
 int RunApp(HINSTANCE hinst, const AppContext& ctx, int showCmd) {
     (void)showCmd;
     if (!CreateMainWindow(hinst, ctx)) return 1;
+
+    // --open <key>：启动后直接执行指定命令（便于脚本化与冒烟测试）
+    if (!ctx.initialCommand.empty()) {
+        const adb::CommandSpec* spec = adb::FindCommandByKey(ctx.initialCommand);
+        if (spec) {
+            SelectCommand(spec);
+            ::PostMessageW(g_app.hwnd, WM_APP_TASK_START, 0, 0);
+        }
+    }
 
     MSG msg;
     while (::GetMessageW(&msg, nullptr, 0, 0)) {

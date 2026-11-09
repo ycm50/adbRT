@@ -54,4 +54,6 @@ int ScaleForDpi(HWND hwnd, int value) {
 
 std::wstring GetDpiScaledFontName() { return L"Microsoft YaHei UI"; }
 
+std::wstring Trim(const std::wstring& s) { return adb::Trim(s); }
+
 }  // namespace adbgui

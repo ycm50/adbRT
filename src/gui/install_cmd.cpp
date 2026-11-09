@@ -74,6 +74,25 @@ void RemoveDesktopShortcut() {
 
 namespace adbgui {
 
+bool DesktopShortcutExists() {
+    std::wstring desktop = GetDesktopDir();
+    if (desktop.empty()) return false;
+    return adb::PathExists(adb::JoinPath(desktop, L"AdbRT.lnk"));
+}
+
+bool SetDesktopShortcut(bool create) {
+    if (!create) { RemoveDesktopShortcut(); return true; }
+    std::wstring dir = adb::GetExeDir();
+    return CreateDesktopShortcut(adb::JoinPath(dir, L"AdbRT.exe"), dir, L"");
+}
+
+bool IsInUserPath(const std::wstring& dir) {
+    std::wstring want = adb::NormalizePath(dir);
+    for (const auto& e : adb::GetUserPathEntries())
+        if (adb::EqualsNoCase(adb::NormalizePath(e), want)) return true;
+    return false;
+}
+
 // 返回进程退出码
 int RunInstall(const std::wstring& installDir, bool addPath, bool desktopShortcut, bool quiet) {
     std::wstring dir = adb::ResolvePathSpec(installDir, adb::GetExeDir());

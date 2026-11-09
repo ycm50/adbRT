@@ -8,6 +8,9 @@ set(ADB_GUI_SOURCES
   stubs.cpp
   ui_util.cpp
   install_cmd.cpp
+  dialogs.cpp
+  builtin.cpp
+  windows2.cpp
 )
 
 # 图标与版本资源：app.rc 里的图标路径在构建期注入绝对路径

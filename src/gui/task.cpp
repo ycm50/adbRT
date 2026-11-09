@@ -104,6 +104,14 @@ DWORD WINAPI WorkerProc(LPVOID param) {
 }  // namespace
 
 void StartRun() {
+    // 内置命令：不开工作线程，直接把窗口叫起来
+    if (g_app.current && g_app.current->exec == adb::ExecKind::Internal) {
+        std::wstring error;
+        if (!RunBuiltinCommand(g_app.hwnd, *g_app.current, &error) && !error.empty())
+            ::MessageBoxW(g_app.hwnd, error.c_str(), L"AdbRT", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
     adb::BuildInput in;
     std::wstring error;
     if (!CollectInput(&in, &error)) {
@@ -116,6 +124,21 @@ void StartRun() {
     if (!adb::BuildCommand(in, &built, &berr)) {
         ::MessageBoxW(g_app.hwnd, berr.message.c_str(), L"AdbRT", MB_OK | MB_ICONWARNING);
         return;
+    }
+
+    // 危险等级确认
+    if (g_app.current) {
+        std::wstring title = adb::CommandTitle(*g_app.current);
+        if (g_app.current->danger == adb::Danger::Breaker) {
+            std::wstring expect = g_app.serial.empty() ? std::wstring(L"FLASH") : g_app.serial;
+            std::wstring msg = std::wstring(L"\u5373\u5c06\u6267\u884c\uff1a\r\n") + built.display +
+                               L"\r\n\r\n\u8fd9\u662f\u53ef\u80fd\u8ba9\u8bbe\u5907\u65e0\u6cd5\u5f00\u673a\u7684\u64cd\u4f5c\u3002";
+            if (!ShowBreakerDialog(g_app.hwnd, title, msg, expect)) return;
+        } else if (g_app.current->danger == adb::Danger::Destructive) {
+            std::wstring msg = std::wstring(L"\u5373\u5c06\u6267\u884c\uff1a\r\n") + built.display +
+                               L"\r\n\r\n\u4f1a\u4e22\u5931\u6570\u636e\uff0c\u7ee7\u7eed\uff1f";
+            if (!ShowConfirmDialog(g_app.hwnd, title, msg)) return;
+        }
     }
 
     g_app.cancelFlag = false;

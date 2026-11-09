@@ -33,8 +33,9 @@ struct TaskOutcome {
 };
 
 struct AppContext {
-    std::wstring initialPath;   // 右键 / 命令行传入的本地路径
+    std::wstring initialPath;      // 命令行传入的本地路径
     bool         fromApk = false;
+    std::string  initialCommand;   // --open <key>：启动后直接执行这条内置命令
 };
 
 struct AppState {
@@ -81,6 +82,9 @@ void RunDoctor();   // --doctor：把环境结论弹窗/打到 stderr
 // 安装/卸载（不写注册表，只动用户 PATH 与桌面快捷方式）
 int  RunInstall(const std::wstring& installDir, bool addPath, bool desktopShortcut, bool quiet);
 int  RunUninstall(bool removePath, bool desktopShortcut, bool quiet);
+bool DesktopShortcutExists();
+bool SetDesktopShortcut(bool create);
+bool IsInUserPath(const std::wstring& dir);
 
 // 主窗口（main_window.cpp）
 bool CreateMainWindow(HINSTANCE hinst, const AppContext& ctx);
@@ -108,8 +112,21 @@ bool ShowConfirmDialog(HWND parent, const std::wstring& title, const std::wstrin
 bool ShowBreakerDialog(HWND parent, const std::wstring& title, const std::wstring& message,
                        const std::wstring& expectText);
 
-// 内嵌功能（builtin.cpp）：设备列表 / 信息 / 应用列表 / 截屏 / 文件浏览 / logcat
+// 内嵌功能（builtin.cpp）：设备列表 / 信息 / 应用列表 / 截屏 / 文件浏览 / logcat / 终端
 bool RunBuiltinCommand(HWND hwnd, const adb::CommandSpec& spec, std::wstring* error);
+
+// 各内嵌窗口（builtin.cpp）
+void ShowDeviceList(HWND parent);
+void ShowDeviceInfo(HWND parent);
+void ShowInstalledApps(HWND parent);
+void ShowPullApk(HWND parent);
+void ShowFileBrowser(HWND parent);
+void ShowLogcat(HWND parent);
+void CaptureScreenshot(HWND parent);
+void OpenInteractiveShell(HWND parent);
+
+// 通用文本窗口（只读，可复制）
+void ShowTextView(HWND parent, const std::wstring& title, const std::wstring& text);
 
 std::wstring AskFile(HWND parent, const wchar_t* title, const wchar_t* filter);
 std::wstring AskFolder(HWND parent, const wchar_t* title);

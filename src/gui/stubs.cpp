@@ -1,5 +1,6 @@
-// 尚未实现的界面部件：占位，保证链接通过（后续增量替换，
-// 见 docs/技术实现设计.md "未实现" 一节。这里**不静默失败**，都给出明确提示。）
+// ---------------------------------------------------------------------------
+// 内置命令分派：把命令表里 ExecKind::Internal 的条目接到具体窗口
+// ---------------------------------------------------------------------------
 #include <windows.h>
 
 #include <string>
@@ -9,32 +10,20 @@
 
 namespace adbgui {
 
-void ShowSettings(HWND parent) {
-    ::MessageBoxW(parent,
-                  L"设置窗口尚未实现（增量的下一步）。\n"
-                  L"现在可以直接编辑 %APPDATA%\\AdbRT\\config.json：\n"
-                  L"  adb.path / fastboot.path / device.current / expert.fastboot",
-                  L"AdbRT", MB_OK | MB_ICONINFORMATION);
-}
-
-bool ShowConfirmDialog(HWND parent, const std::wstring& title, const std::wstring& message) {
-    return ::MessageBoxW(parent, message.c_str(), title.c_str(),
-                         MB_OKCANCEL | MB_ICONWARNING) == IDOK;
-}
-
-bool ShowBreakerDialog(HWND parent, const std::wstring& title, const std::wstring& message,
-                       const std::wstring& expectText) {
-    std::wstring text = message + L"\n\n这是破坏性操作。请在弹出的提示中确认。";
-    (void)expectText;
-    return ::MessageBoxW(parent, text.c_str(), title.c_str(),
-                         MB_OKCANCEL | MB_ICONERROR) == IDOK;
-}
-
 bool RunBuiltinCommand(HWND hwnd, const adb::CommandSpec& spec, std::wstring* error) {
-    (void)hwnd;
-    if (error) {
-        *error = L"内置功能「" + adb::Utf8ToWide(spec.key) + L"」尚未实现（下一步）。";
-    }
+    std::string key = spec.key;
+
+    if (key == "device.list")        { ShowDeviceList(hwnd);      return true; }
+    if (key == "device.info")        { ShowDeviceInfo(hwnd);      return true; }
+    if (key == "app.list")           { ShowInstalledApps(hwnd);   return true; }
+    if (key == "app.pullApk")        { ShowPullApk(hwnd);         return true; }
+    if (key == "file.browse")        { ShowFileBrowser(hwnd);     return true; }
+    if (key == "screen.capture")     { CaptureScreenshot(hwnd);   return true; }
+    if (key == "logcat.live")        { ShowLogcat(hwnd);          return true; }
+    if (key == "shell.terminal")     { OpenInteractiveShell(hwnd);return true; }
+    if (key == "tool.settings")      { ShowSettings(hwnd);        return true; }
+
+    if (error) *error = std::wstring(L"内置功能「") + adb::CommandTitle(spec) + L"」尚未实现。";
     return false;
 }
 
