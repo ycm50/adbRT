@@ -77,7 +77,6 @@ extern AppState g_app;
 
 int  RunApp(HINSTANCE hinst, const AppContext& ctx, int showCmd);
 int  RunSelfTest(const std::wstring& reportPath);
-void RunDoctor();   // --doctor：把环境结论弹窗/打到 stderr
 
 // 安装/卸载（不写注册表，只动用户 PATH 与桌面快捷方式）
 int  RunInstall(const std::wstring& installDir, bool addPath, bool desktopShortcut, bool quiet);

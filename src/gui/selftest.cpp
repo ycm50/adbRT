@@ -51,25 +51,6 @@ void CheckStr(const std::wstring& actual, const wchar_t* expect, const wchar_t* 
 
 }  // namespace
 
-void RunDoctor() {
-    auto& st = adb::Settings::Instance();
-    st.Reload(true);
-    std::wstring text;
-    text += L"AdbRT " + adb::W(ADB_VERSION_STR) + L"\n\n";
-    text += L"adb      : " + adb::DescribePathSpec(st.AdbSpec()) + L"\n";
-    text += L"fastboot : " + adb::DescribePathSpec(st.FastbootSpec()) + L"\n";
-    text += L"配置文件 : " + st.Path() + L"\n\n";
-    auto& session = adb::DeviceSession::Instance();
-    std::wstring adbPath = session.AdbExe();
-    text += L"解析到 adb : " + (adbPath.empty() ? std::wstring(L"（未找到）") : adbPath) + L"\n";
-    if (!adbPath.empty()) {
-        auto list = session.ListAdb();
-        text += L"在线设备   : " + std::to_wstring(list.size()) + L" 台\n";
-        for (const auto& d : list) text += L"  - " + d.Describe() + L"\n";
-    }
-    ::MessageBoxW(nullptr, text.c_str(), L"AdbRT 自检", MB_OK | MB_ICONINFORMATION);
-}
-
 int RunSelfTest(const std::wstring& reportPath) {
     g_report += L"AdbRT 自检 ";
     g_report += adb::W(ADB_VERSION_STR);
@@ -152,6 +133,26 @@ int RunSelfTest(const std::wstring& reportPath) {
                      L"-s 3B661M00VQ000000 install -r A:\\build\\app.apk",
                      L"app.install 命令行");
         }
+    }
+
+    // ---- 内置命令分派：命令表里每个 Internal 都必须有落点 ----
+    {
+        const char* kBuiltin[] = {
+            "device.list", "device.select", "device.info",
+            "app.list", "app.pullApk",
+            "file.browse", "screen.capture", "logcat.live", "shell.terminal",
+            "tool.settings", "tool.about", "tool.doctor", "tool.openToolsDir",
+        };
+        int missing = 0;
+        for (size_t i = 0; i < adb::CommandTableSize(); ++i) {
+            const auto& c = adb::CommandTable()[i];
+            if (c.exec != adb::ExecKind::Internal) continue;
+            bool found = false;
+            for (const char* k : kBuiltin)
+                if (std::string(k) == c.key) { found = true; break; }
+            if (!found) ++missing;
+        }
+        Check(missing == 0, L"所有内置命令都有对应窗口");
     }
 
     // ---- 配置往返 ----

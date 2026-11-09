@@ -43,6 +43,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int showCmd) {
     adbgui::AppContext ctx;
     std::wstring selftestPath;
     std::wstring tempAdb;
+    bool doctorMode = false;
 
     for (int i = 1; i < argc; ++i) {
         std::wstring a = argv[i];
@@ -58,7 +59,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int showCmd) {
             return 0;
         }
         if (a == L"--selftest" && i + 1 < argc) { selftestPath = argv[++i]; continue; }
-        if (a == L"--doctor") { adbgui::RunDoctor(); if (argv) ::LocalFree(argv); return 0; }
+        if (a == L"--doctor") { doctorMode = true; continue; }
         if (a == L"--install") {
             std::wstring dir = (i + 1 < argc && argv[i + 1][0] != L'-') ? argv[++i] : adb::GetExeDir();
             bool addPath = true, desktop = true, quiet = false;
@@ -97,6 +98,10 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int showCmd) {
 
     // --adb 只临时生效，不落盘（避免测桩把用户配置改掉）
     if (!tempAdb.empty()) adb::SetTransientAdbOverride(tempAdb);
+
+    if (doctorMode) {
+        ctx.initialCommand = "tool.doctor";
+    }
 
     if (!selftestPath.empty()) {
         int rc = adbgui::RunSelfTest(selftestPath);
