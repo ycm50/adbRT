@@ -46,5 +46,6 @@ bool IsValidRemotePath(std::wstring_view s);
 bool IsValidHostPort(std::wstring_view s);
 bool IsValidPartitionName(std::wstring_view s);
 bool IsValidSerial(std::wstring_view s);
+bool IsValidCoords(std::wstring_view s, size_t expectCount);
 
 }  // namespace adb

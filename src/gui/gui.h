@@ -8,6 +8,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -92,6 +93,10 @@ extern AppState g_app;
 int  RunApp(HINSTANCE hinst, const AppContext& ctx, int showCmd);
 int  RunSelfTest(const std::wstring& reportPath);
 
+// CLI 门面（scripting）：走同一条 BuildCommand 路径，不存在绕过白名单的旁路
+int  RunCli(const std::vector<std::wstring>& args);
+int  ListCommands(const std::wstring& outFile);
+
 // 安装/卸载（不写注册表，只动用户 PATH 与桌面快捷方式）
 int  RunInstall(const std::wstring& installDir, bool addPath, bool desktopShortcut, bool quiet);
 int  RunUninstall(bool removePath, bool desktopShortcut, bool quiet);
@@ -143,6 +148,8 @@ void OpenInteractiveShell(HWND parent);
 
 // 通用文本窗口（只读，可复制）
 void ShowTextView(HWND parent, const std::wstring& title, const std::wstring& text);
+void ShowTextViewAsync(HWND parent, const std::wstring& title, const std::wstring& placeholder,
+                       std::function<std::wstring()> loader);
 
 std::wstring AskFile(HWND parent, const wchar_t* title, const wchar_t* filter);
 std::wstring AskFolder(HWND parent, const wchar_t* title);

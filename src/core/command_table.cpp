@@ -139,10 +139,10 @@ static const CommandSpec kCommands[] = {
       ParamKind::None, ParamSource::None, nullptr, ExecKind::CliStream, kScreenrecordFlags, 3,
       "shell screenrecord {flags} /sdcard/adbrt-record.mp4"),
     C(1303, "input.tap", GroupId::Screen, 0, kSelNone, true, false, Danger::Safe,
-      ParamKind::Text, ParamSource::None, "xy", ExecKind::Cli, nullptr, 0,
+      ParamKind::Coords, ParamSource::None, "xy", ExecKind::Cli, nullptr, 0,
       "shell input tap {xy}"),
     C(1304, "input.swipe", GroupId::Screen, 0, kSelNone, true, false, Danger::Safe,
-      ParamKind::Text, ParamSource::None, "xys", ExecKind::Cli, nullptr, 0,
+      ParamKind::Coords, ParamSource::None, "xys", ExecKind::Cli, nullptr, 0,
       "shell input swipe {xys}"),
     C(1305, "input.text", GroupId::Screen, 0, kSelNone, true, false, Danger::Safe,
       ParamKind::Text, ParamSource::None, "text", ExecKind::Cli, nullptr, 0,
@@ -317,6 +317,7 @@ const wchar_t* ParamLabel(ParamKind kind) {
         case ParamKind::UserId:       return L"用户 ID";
         case ParamKind::SlotName:     return L"槽位（a / b）";
         case ParamKind::Port:         return L"端口";
+        case ParamKind::Coords:       return L"坐标（用空格分隔，如 640 1200）";
         default:                      return L"参数";
     }
 }

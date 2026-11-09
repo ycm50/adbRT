@@ -133,6 +133,31 @@ bool IsValidPartitionName(std::wstring_view s) {
     return true;
 }
 
+// 坐标类参数：只允许数字、负号与空格，且段数必须是 2 或 5
+// （这一段会被透传到设备侧 shell，所以必须在这里把注入面堵死）
+bool IsValidCoords(std::wstring_view s, size_t expectCount) {
+    if (s.empty() || s.size() > 64) return false;
+    int count = 0;
+    bool inNumber = false;
+    for (wchar_t c : s) {
+        if (c >= L'0' && c <= L'9') { inNumber = true; continue; }
+        if (c == L'-') {
+            if (inNumber) return false;
+            inNumber = true;
+            continue;
+        }
+        if (c == L' ') {
+            if (!inNumber) return false;
+            inNumber = false;
+            ++count;
+            continue;
+        }
+        return false;   // ; & | $ ` 等一律拒绝
+    }
+    if (inNumber) ++count;
+    return static_cast<size_t>(count) == expectCount;
+}
+
 bool IsValidSerial(std::wstring_view s) {
     if (s.empty() || s.size() > 128) return false;
     for (wchar_t c : s) {
@@ -172,6 +197,24 @@ bool BuildCommand(const BuildInput& in, BuiltCommand* out, BuildError* err) {
                                                            ? std::wstring::npos : sep - start));
             if (sep == std::wstring::npos) break;
             start = sep + 3;
+        }
+    }
+
+    // 坐标类参数前置校验（在模板渲染之前，避免脏值进入 argv）
+    if (spec.param == ParamKind::Coords && spec.paramKey) {
+        auto it = in.params.find(spec.paramKey);
+        std::wstring v = (it == in.params.end()) ? std::wstring() : Trim(it->second);
+        size_t want = (std::string(spec.paramKey) == "xys") ? 5 : 2;
+        if (v.empty()) {
+            if (err) { err->message = L"缺少坐标参数"; err->field = spec.paramKey; }
+            return false;
+        }
+        if (!IsValidCoords(v, want)) {
+            if (err) {
+                err->message = Format(L"坐标只能是 %zu 个数字，用空格分隔（如 640 1200）", want);
+                err->field = spec.paramKey;
+            }
+            return false;
         }
     }
 

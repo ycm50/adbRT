@@ -59,6 +59,19 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE, PWSTR, int showCmd) {
             return 0;
         }
         if (a == L"--selftest" && i + 1 < argc) { selftestPath = argv[++i]; continue; }
+        if (a == L"--run" || a == L"--list-commands") {
+            // CLI 门面：把剩下的参数原样交给 RunCli（它自己解析）
+            std::vector<std::wstring> rest;
+            for (int k = 1; k < argc; ++k) rest.push_back(argv[k]);
+            if (argv) ::LocalFree(argv);
+            if (a == L"--list-commands") {
+                std::wstring out;
+                for (size_t k = 0; k < rest.size(); ++k)
+                    if (rest[k] == L"--out" && k + 1 < rest.size()) out = rest[k + 1];
+                return adbgui::ListCommands(out);
+            }
+            return adbgui::RunCli(rest);
+        }
         if (a == L"--doctor") { doctorMode = true; continue; }
         if (a == L"--install") {
             std::wstring dir = (i + 1 < argc && argv[i + 1][0] != L'-') ? argv[++i] : adb::GetExeDir();

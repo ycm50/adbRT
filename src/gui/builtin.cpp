@@ -7,6 +7,8 @@
 #include <commdlg.h>
 #include <shellapi.h>
 
+#include <atomic>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -15,6 +17,7 @@
 #include "../core/parsers.h"
 #include "../core/settings.h"
 #include "gui.h"
+#include "reports.h"
 #include "resource.h"
 #include "ui_util.h"
 
@@ -43,20 +46,56 @@ constexpr wchar_t* kTextWndClass = L"AdbRTTextView";
 
 struct TextWin {
     std::wstring title;
-    std::wstring body;
+    std::wstring body;                 // 立即可显示的内容（可为占位）
+    std::function<std::wstring()> loader;   // 非空 = 后台线程算完再替换
+    HWND  hwnd = nullptr;
+    std::atomic<bool> cancelled{false};
 };
 
+constexpr UINT WM_APP_TEXT_READY = WM_APP + 60;
+
+struct LoadResult {
+    HWND hwnd = nullptr;
+    std::wstring text;
+};
+
+DWORD WINAPI TextLoaderProc(LPVOID param) {
+    auto* ctx = static_cast<TextWin*>(param);
+    std::wstring result;
+    if (ctx->loader) result = ctx->loader();
+    if (ctx->cancelled.load() || !ctx->hwnd) return 0;
+    auto* heap = new LoadResult{ctx->hwnd, std::move(result)};
+    if (!::PostMessageW(ctx->hwnd, WM_APP_TEXT_READY, 0, reinterpret_cast<LPARAM>(heap)))
+        delete heap;
+    return 0;
+}
+
 LRESULT CALLBACK TextProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* ctx = reinterpret_cast<TextWin*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     switch (msg) {
         case WM_CREATE: {
-            auto* ctx = reinterpret_cast<TextWin*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+            ctx = reinterpret_cast<TextWin*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
             ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ctx));
+            ctx->hwnd = hwnd;
             HWND edit = ::CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", ctx->body.c_str(),
                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY |
                     ES_AUTOVSCROLL | ES_AUTOHSCROLL,
                 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_EDIT_OUTPUT), nullptr, nullptr);
             ApplyFont(edit, CreateUiFont(9, true));
             ::SetWindowTextW(hwnd, ctx->title.c_str());
+            if (ctx->loader) {
+                ::CreateThread(nullptr, 0, TextLoaderProc, ctx, 0, nullptr);
+            }
+            return 0;
+        }
+        case WM_APP_TEXT_READY: {
+            auto* res = reinterpret_cast<LoadResult*>(lp);
+            if (res && ctx) {
+                HWND edit = ::GetDlgItem(hwnd, IDC_EDIT_OUTPUT);
+                if (edit) ::SetWindowTextW(edit, res->text.c_str());
+                ctx->body = res->text;
+                delete res;
+            }
             return 0;
         }
         case WM_SIZE: {
@@ -66,7 +105,12 @@ LRESULT CALLBACK TextProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_CLOSE: ::DestroyWindow(hwnd); return 0;
         case WM_DESTROY:
-            delete reinterpret_cast<TextWin*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+            if (ctx) {
+                ctx->cancelled = true;
+                ctx->hwnd = nullptr;
+                ::Sleep(80);          // 给后台线程一点时间看到 cancelled
+            }
+            delete ctx;
             return 0;
         default: break;
     }
@@ -92,7 +136,19 @@ void EnsureTextClass(HINSTANCE hinst) {
 // ------------------------------------------------------------------ 文本窗口
 void ShowTextView(HWND parent, const std::wstring& title, const std::wstring& text) {
     EnsureTextClass(InstOf(parent));
-    auto* ctx = new TextWin{title, text};
+    auto* ctx = new TextWin{title, text, nullptr, nullptr, false};
+    HWND hwnd = ::CreateWindowExW(WS_EX_APPWINDOW, kTextWndClass, title.c_str(),
+                                  WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                                  900, 600, parent, nullptr, InstOf(parent), ctx);
+    if (hwnd) { ::ShowWindow(hwnd, SW_SHOW); ::UpdateWindow(hwnd); }
+    else delete ctx;
+}
+
+// 异步版：窗口立刻出现，内容由后台线程填（设备信息要十几个往返，不能卡住 UI）
+void ShowTextViewAsync(HWND parent, const std::wstring& title, const std::wstring& placeholder,
+                       std::function<std::wstring()> loader) {
+    EnsureTextClass(InstOf(parent));
+    auto* ctx = new TextWin{title, placeholder, std::move(loader), nullptr, false};
     HWND hwnd = ::CreateWindowExW(WS_EX_APPWINDOW, kTextWndClass, title.c_str(),
                                   WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                   900, 600, parent, nullptr, InstOf(parent), ctx);
@@ -102,26 +158,7 @@ void ShowTextView(HWND parent, const std::wstring& title, const std::wstring& te
 
 // --------------------------------------------------------------- 设备列表
 void ShowDeviceList(HWND parent) {
-    auto devices = adb::DeviceSession::Instance().ListAdb();
-    std::wstring text;
-    if (devices.empty()) {
-        text = L"没有检测到设备。\r\n\r\n请确认：\r\n"
-               L"  1. USB 线已连接，手机上开启「开发者选项 → USB 调试」\r\n"
-               L"  2. 手机弹出的「允许 USB 调试」已点允许\r\n"
-               L"  3. 已安装对应厂商的 USB 驱动\r\n";
-    } else {
-        text = adb::Format(L"共 %zu 台设备：\r\n\r\n", devices.size());
-        for (const auto& d : devices) {
-            text += L"序列号   : " + d.serial + L"\r\n";
-            text += L"状态     : " + std::wstring(adb::StateName(d.state)) + L"\r\n";
-            if (!d.product.empty())     text += L"product  : " + d.product + L"\r\n";
-            if (!d.model.empty())       text += L"model    : " + d.model + L"\r\n";
-            if (!d.device.empty())      text += L"device   : " + d.device + L"\r\n";
-            if (!d.transportId.empty()) text += L"transport: " + d.transportId + L"\r\n";
-            text += L"\r\n";
-        }
-    }
-    ShowTextView(parent, L"设备列表", text);
+    ShowTextView(parent, L"设备列表", BuildDeviceListText());
 }
 
 // --------------------------------------------------------------- 设备信息
@@ -131,37 +168,11 @@ void ShowDeviceInfo(HWND parent) {
         ShowTextView(parent, L"设备信息", L"没有选中设备。请先连接设备并点「刷新设备」。");
         return;
     }
-
-    struct Query { const wchar_t* cmd; const wchar_t* label; };
-    const Query queries[] = {
-        {L"getprop ro.product.brand",         L"厂商"},
-        {L"getprop ro.product.model",         L"型号"},
-        {L"getprop ro.build.version.release", L"Android 版本"},
-        {L"getprop ro.build.version.sdk",     L"SDK 版本"},
-        {L"getprop ro.product.cpu.abi",       L"CPU 架构"},
-        {L"getprop ro.build.type",            L"构建类型"},
-        {L"getprop ro.debuggable",            L"可调试"},
-        {L"getprop ro.secure",                L"Secure"},
-        {L"getprop ro.boot.slot_suffix",      L"当前槽位"},
-        {L"getprop ro.serialno",              L"序列号"},
-        {L"wm size",                          L"屏幕分辨率"},
-        {L"wm density",                       L"屏幕密度"},
-    };
-
-    std::wstring text = L"设备：" + session.CurrentSerial() + L"\r\n\r\n";
-    for (const auto& q : queries) {
-        std::wstring v = session.Shell(q.cmd, 8000);
-        if (v.empty()) v = L"（未知）";
-        text += adb::Format(L"%-14ls %ls\r\n", q.label, v.c_str());
-    }
-
-    std::wstring storage = session.Shell(L"df -h /data", 8000);
-    if (!storage.empty()) text += L"\r\n存储：\r\n" + storage + L"\r\n";
-    std::wstring mem = session.Shell(L"cat /proc/meminfo | head -n 3", 8000);
-    if (!mem.empty()) text += L"\r\n内存：\r\n" + mem + L"\r\n";
-
-    ShowTextView(parent, L"设备信息 - " + session.CurrentSerial(), text);
+    ShowTextViewAsync(parent, L"设备信息 - " + session.CurrentSerial(),
+                      L"正在读取设备信息…（需要十几次 adb 往返，请稍候）",
+                      [] { return BuildDeviceInfoText(); });
 }
+
 // ------------------------------------------------------------- 已安装应用
 namespace {
 

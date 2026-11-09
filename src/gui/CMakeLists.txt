@@ -2,6 +2,8 @@
 set(ADB_GUI_SOURCES
   main.cpp
   main_window.cpp
+  cli.cpp
+  reports.cpp
   theme.cpp
   param_panel.cpp
   task.cpp

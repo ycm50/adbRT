@@ -37,7 +37,8 @@ enum class Danger : uint8_t {
 enum class ParamKind : uint8_t {
     None, ApkFile, LocalPaths, RemotePath, PackageName, ActivityName,
     HostPort, PairCode, Partition, ImageFile, ShellCommand, Text,
-    Url, KeyCode, Permission, PropKey, UserId, SlotName, Port
+    Url, KeyCode, Permission, PropKey, UserId, SlotName, Port,
+    Coords,        // 只允许数字与空格（如 "640 1200"），杜绝 shell 注入
 };
 
 enum class ParamSource : uint8_t {

@@ -73,6 +73,38 @@ int main() {
     Check(adb::IsValidPartitionName(L"boot_a"), "分区名合法");
     Check(!adb::IsValidPartitionName(L"boot;rm -rf"), "分区名拒绝注入");
 
+    // ---------------------------------------------------------- 坐标注入防护
+    {
+        Check(adb::IsValidCoords(L"640 1200", 2), "坐标 2 段合法");
+        Check(adb::IsValidCoords(L"640 1600 640 800 300", 5), "坐标 5 段合法");
+        Check(!adb::IsValidCoords(L"640", 2), "坐标段数不足被拒");
+        Check(!adb::IsValidCoords(L"640;reboot", 2), "坐标里的分号被拒");
+        Check(!adb::IsValidCoords(L"640 1200 && rm -rf /", 2), "坐标里的 && 被拒");
+        Check(!adb::IsValidCoords(L"$(reboot) 1", 2), "坐标里的 $() 被拒");
+
+        // 端到端：脏坐标必须让 BuildCommand 直接失败，而不是生成命令
+        const adb::CommandSpec* tap = adb::FindCommandByKey("input.tap");
+        Check(tap != nullptr, "找到 input.tap");
+        if (tap) {
+            Check(tap->param == adb::ParamKind::Coords, "input.tap 用坐标类型");
+            adb::BuildInput in;
+            in.spec = tap;
+            in.toolExe = L"adb.exe";
+            in.serial = L"S1";
+            in.params["xy"] = L"640;reboot";
+            adb::BuiltCommand out;
+            adb::BuildError err;
+            Check(!adb::BuildCommand(in, &out, &err), "注入型坐标构造失败");
+
+            in.params["xy"] = L"640 1200";
+            adb::BuiltCommand ok2;
+            adb::BuildError err2;
+            Check(adb::BuildCommand(in, &ok2, &err2), "合法坐标构造成功");
+            if (!ok2.argvList.empty())
+                CheckEq(ok2.argvList[0].back(), L"640 1200", "坐标作为单个 argv 传入");
+        }
+    }
+
     // ---------------------------------------------------------- 设备解析
     {
         auto devs = adb::ParseDevices(

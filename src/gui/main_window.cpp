@@ -806,8 +806,9 @@ int RunApp(HINSTANCE hinst, const AppContext& ctx, int showCmd) {
     }
 
     if (!ctx.initialCommand.empty()) {
-        const adb::CommandSpec* spec = adb::FindCommandByKey(ctx.initialCommand);
-        if (spec) {
+        if (const adb::CommandSpec* spec = adb::FindCommandByKey(ctx.initialCommand)) {
+            // --open 优先：先选中它再执行，避免被 --select 选中的命令顶掉
+            SelectTreeItemById(spec->id);
             SelectCommand(spec);
             ::PostMessageW(g_app.hwnd, WM_APP_TASK_START, 0, 0);
         }
