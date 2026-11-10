@@ -76,3 +76,15 @@
 #define IDC_STATIC_OUTPUT   3039
 #define IDC_STATIC_PREVIEW  3040
 #define IDC_PARAM_HOST_2    3041
+#define IDC_COMBO_PARAM     3042
+#define IDC_CHK_WHOLEFOLDER 3043
+#define IDC_BTN_ACTION4     3044
+#define IDC_LIST_CHECK      3045
+#define IDC_STATIC_HINT2    3046
+#define IDC_EDIT_VALUE      3047
+#define IDC_CHK_ITEM        3048
+#define IDC_PIPE_ADD        3049
+#define IDC_PIPE_DEL        3050
+#define IDC_BTN_ACTION5     3053
+#define IDC_SHOT_CANVAS     3051
+#define IDD_SHOT            3052

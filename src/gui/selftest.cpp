@@ -160,7 +160,7 @@ int RunSelfTest(const std::wstring& reportPath) {
         const char* kBuiltin[] = {
             "device.list", "device.select", "device.info",
             "app.list", "app.pullApk",
-            "file.browse", "screen.capture", "logcat.live", "shell.terminal",
+            "screen.capture", "logcat.live", "shell.terminal",
             "tool.settings", "tool.about", "tool.doctor", "tool.openToolsDir",
         };
         int missing = 0;

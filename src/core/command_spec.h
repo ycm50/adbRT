@@ -39,6 +39,14 @@ enum class ParamKind : uint8_t {
     HostPort, PairCode, Partition, ImageFile, ShellCommand, Text,
     Url, KeyCode, Permission, PropKey, UserId, SlotName, Port,
     Coords,        // 只允许数字与空格（如 "640 1200"），杜绝 shell 注入
+    LocalFiles,    // 本机文件（可多选 / 整个文件夹），写入 BuildInput::paths
+    RemotePick,    // 推送目标：/tmp 或 /sdcard 下拉 + 相对路径输入
+    RemoteDyn,     // 设备目录：动态列出 /sdcard 下的文件夹 + 相对路径输入
+    RebootTarget,  // 重启目标（下拉）
+    PropKeys,      // 系统属性（多选复选框，展开成多条 getprop）
+    ShellPipeline, // 三段式 shell 命令（自定义编辑器 + 管道）
+    Duration,      // 毫秒数（滑动时长），可为空
+    LanHost        // 局域网地址：可手填，也可点「扫描局域网」挑一台
 };
 
 enum class ParamSource : uint8_t {
@@ -91,6 +99,8 @@ struct CommandSpec {
     const FlagSpec* flags;
     uint8_t         flagCount;
     const char*     argvTemplate;   // "install {flags} {apk}"；多命令用 " ; " 分隔
+                                    // 占位写成 {key?} 表示可选：值为空时整段丢弃
+    bool            pkgHideSystem;  // 应用选择器默认隐藏系统应用（卸载这类高危命令用）
 };
 
 const CommandSpec* CommandTable();

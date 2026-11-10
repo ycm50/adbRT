@@ -67,7 +67,6 @@ bool RunBuiltinCommand(HWND hwnd, const adb::CommandSpec& spec, std::wstring* er
     if (key == "device.info")          { ShowDeviceInfo(hwnd);       return true; }
     if (key == "app.list")             { ShowInstalledApps(hwnd);    return true; }
     if (key == "app.pullApk")          { ShowPullApk(hwnd);          return true; }
-    if (key == "file.browse")          { ShowFileBrowser(hwnd);      return true; }
     if (key == "screen.capture")       { CaptureScreenshot(hwnd);    return true; }
     if (key == "logcat.live")          { ShowLogcat(hwnd);           return true; }
     if (key == "shell.terminal")       { OpenInteractiveShell(hwnd); return true; }

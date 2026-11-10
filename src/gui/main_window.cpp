@@ -178,12 +178,15 @@ void LayoutChildren(HWND hwnd) {
     ::MoveWindow(g_app.hDanger,   rx + rw - Dpi(88), top + Dpi(6), Dpi(88), Dpi(20), TRUE);
 
     const int paramsTop = top + Dpi(kTitleH + kGapSmall);
-    const int paramsH = Dpi(150);
-    ::MoveWindow(g_app.hParamsLabel, rx, paramsTop, rw, Dpi(18), TRUE);
-    ::MoveWindow(g_app.hParamHost, rx, paramsTop + Dpi(20), rw, paramsH, TRUE);
+    // 参数区高度跟着内容走（上限由 ParamPanelHeight 自己截断）
+    const int paramsH = ParamPanelHeight();
+    ::MoveWindow(g_app.hParamsLabel, rx, paramsTop, rw, Dpi(20), TRUE);
+    ::MoveWindow(g_app.hParamHost, rx, paramsTop + Dpi(20), rw,
+                 paramsH > 0 ? paramsH : Dpi(1), TRUE);
+    ::ShowWindow(g_app.hParamHost, paramsH > 0 ? SW_SHOW : SW_HIDE);
 
     const int previewTop = paramsTop + Dpi(20) + paramsH + Dpi(kGap);
-    ::MoveWindow(g_app.hPreviewLabel, rx, previewTop, rw - Dpi(96), Dpi(18), TRUE);
+    ::MoveWindow(g_app.hPreviewLabel, rx, previewTop, rw - Dpi(96), Dpi(20), TRUE);
     ::MoveWindow(g_app.hCopy, rx + rw - Dpi(90), previewTop - Dpi(2), Dpi(90), Dpi(22), TRUE);
     ::MoveWindow(g_app.hPreview, rx, previewTop + Dpi(20), rw, Dpi(kPreviewH), TRUE);
 
@@ -192,17 +195,27 @@ void LayoutChildren(HWND hwnd) {
     ::MoveWindow(g_app.hCancel, rx + Dpi(104), btnTop, Dpi(96), Dpi(kBtnH), TRUE);
 
     const int outLabelTop = btnTop + Dpi(kBtnH + kGap);
-    ::MoveWindow(g_app.hOutputLabel, rx, outLabelTop, rw - Dpi(150), Dpi(18), TRUE);
+    ::MoveWindow(g_app.hOutputLabel, rx, outLabelTop, rw - Dpi(150), Dpi(20), TRUE);
     ::MoveWindow(g_app.hSaveOut,  rx + rw - Dpi(146), outLabelTop - Dpi(2), Dpi(70), Dpi(22), TRUE);
     ::MoveWindow(g_app.hClearOut, rx + rw - Dpi(72),  outLabelTop - Dpi(2), Dpi(70), Dpi(22), TRUE);
 
     const int outTop = outLabelTop + Dpi(20);
     const int outH = h - outTop - Dpi(kStatusH + kGap);
-    ::MoveWindow(g_app.hOutput, rx, outTop, rw, outH > Dpi(60) ? outH : Dpi(60), TRUE);
+    ::MoveWindow(g_app.hOutput, rx, outTop, rw, outH > Dpi(120) ? outH : Dpi(120), TRUE);
 
     // ---- 状态栏 ----
     ::MoveWindow(g_app.hStatus, Dpi(kGap), h - Dpi(kStatusH), w - Dpi(kGap) * 2,
                  Dpi(kStatusH), TRUE);
+
+}
+
+// 参数区高度会变，子控件会整块移动：只 InvalidateRect 父窗口是不够的，
+// 因为子控件占着的地方父窗口本来就不画（WS_CLIPCHILDREN），
+// 旧位置就会留下"重影"。必须 RDW_ALLCHILDREN 连子控件一起重绘。
+void RelayoutAndRepaint(HWND hwnd) {
+    LayoutChildren(hwnd);
+    ::RedrawWindow(hwnd, nullptr, nullptr,
+                   RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 void PaintHeader(HWND hwnd, HDC dc) {
@@ -333,6 +346,8 @@ void SelectCommand(const adb::CommandSpec* spec) {
                              ? L"参数" : L"参数（这条命令没有可选项）");
     }
     InvalidateDangerBadge();
+    // 参数区高度随命令变化，必须重排 + 连子控件一起重绘，否则旧位置留残影
+    if (g_app.hwnd) RelayoutAndRepaint(g_app.hwnd);
     UpdatePreview();
 }
 
@@ -568,8 +583,10 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0, hwnd,
                 reinterpret_cast<HMENU>(IDC_STATIC_PARAMS), inst, nullptr);
 
+            // WS_CLIPSIBLINGS 必须有：参数区高度会变，重绘时不能盖到"执行/取消"这些兄弟控件上
+            // （之前"按钮被黑块盖住"就是这个原因）
             g_app.hParamHost = ::CreateWindowExW(WS_EX_CONTROLPARENT, L"STATIC", L"",
-                WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, 0, 0, 0, 0, hwnd,
+                WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, 0, 0, hwnd,
                 reinterpret_cast<HMENU>(IDC_PARAM_PANEL), inst, nullptr);
 
             g_app.hPreviewLabel = ::CreateWindowExW(0, L"STATIC", L"将执行的命令",
@@ -612,8 +629,13 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (HWND c : {g_app.hDeviceCombo, g_app.hRefreshing, g_app.btnFastboot,
                            g_app.hSettings, g_app.hAbout, g_app.hSearch, g_app.hTree,
                            g_app.hPreview, g_app.hOutput, g_app.hRun, g_app.hCancel,
-                           g_app.hCopy, g_app.hSaveOut, g_app.hClearOut, g_app.hStatus})
+                           g_app.hCopy, g_app.hSaveOut, g_app.hClearOut, g_app.hStatus}) {
+                // WS_CLIPSIBLINGS：参数区高度变化时兄弟控件会互相覆盖，
+                // 缺了它就会出现"按钮/图标变黑"这类重绘残留
+                LONG_PTR style = ::GetWindowLongPtrW(c, GWL_STYLE);
+                if (style) ::SetWindowLongPtrW(c, GWL_STYLE, style | WS_CLIPSIBLINGS);
                 ApplyFont(c, FontNormal());
+            }
             for (HWND c : {g_app.hCmdTitle})
                 ApplyFont(c, FontTitle());
             for (HWND c : {g_app.hParamsLabel, g_app.hPreviewLabel, g_app.hOutputLabel})
@@ -712,7 +734,8 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_SIZE:
             LayoutChildren(hwnd);
-            ::InvalidateRect(hwnd, nullptr, TRUE);
+            ::RedrawWindow(hwnd, nullptr, nullptr,
+                           RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             return 0;
         case WM_GETMINMAXINFO: {
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lp);

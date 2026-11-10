@@ -7,10 +7,15 @@ add_library(adbrt_core STATIC
   adb_runner.cpp
   device.cpp
   settings.cpp
+  apk_res.cpp
+  label_cache.cpp
+  inflate.cpp
+  lan_scan.cpp
 )
 
 target_include_directories(adbrt_core PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}"
   "${ADB_GENERATED_DIR}")
 
-target_link_libraries(adbrt_core PUBLIC advapi32 shell32 ole32 user32)
+target_link_libraries(adbrt_core PUBLIC advapi32 shell32 ole32 user32
+                            ws2_32 iphlpapi icmp)

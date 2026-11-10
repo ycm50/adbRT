@@ -84,13 +84,30 @@ std::wstring DeviceSession::Shell(const std::wstring& cmd, uint32_t timeoutMs) {
 }
 
 std::vector<PackageEntry> DeviceSession::InstalledPackages(bool includeSystem) {
-    std::vector<std::wstring> args = {L"shell", L"pm", L"list", L"packages"};
-    if (!includeSystem) { args.push_back(L"-3"); }
+    // 只要第三方时直接 -3；要全量时再补一次 -3 用来标记哪些是系统应用
+    std::vector<std::wstring> base = {L"shell", L"pm", L"list", L"packages"};
     RunOptions o;
     o.timeoutMs = 30000;
-    auto r = RunProcess(AdbExe(), WithSerial(args), o);
-    if (!r.started) return {};
-    return ParsePackageList(r.OutW());
+
+    if (!includeSystem) {
+        auto r = RunProcess(AdbExe(), WithSerial({L"shell", L"pm", L"list", L"packages", L"-3"}), o);
+        if (!r.started) return {};
+        return ParsePackageList(r.OutW());
+    }
+
+    auto all = RunProcess(AdbExe(), WithSerial(base), o);
+    if (!all.started) return {};
+    auto thirdParty = RunProcess(AdbExe(),
+                                 WithSerial({L"shell", L"pm", L"list", L"packages", L"-3"}), o);
+
+    std::vector<std::wstring> third;
+    for (const auto& p : ParsePackageList(thirdParty.OutW())) third.push_back(p.package);
+
+    std::vector<PackageEntry> out = ParsePackageList(all.OutW());
+    for (auto& p : out) {
+        p.system = std::find(third.begin(), third.end(), p.package) == third.end();
+    }
+    return out;
 }
 
 std::vector<std::wstring> DeviceSession::Partitions() {

@@ -141,7 +141,6 @@ void ShowDeviceList(HWND parent);
 void ShowDeviceInfo(HWND parent);
 void ShowInstalledApps(HWND parent);
 void ShowPullApk(HWND parent);
-void ShowFileBrowser(HWND parent);
 void ShowLogcat(HWND parent);
 void CaptureScreenshot(HWND parent);
 void OpenInteractiveShell(HWND parent);
@@ -152,6 +151,32 @@ void ShowTextViewAsync(HWND parent, const std::wstring& title, const std::wstrin
                        std::function<std::wstring()> loader);
 
 std::wstring AskFile(HWND parent, const wchar_t* title, const wchar_t* filter);
+// 多选文件：返回用 ";" 连接的绝对路径（取消返回空）
+std::wstring AskFilesMulti(HWND parent, const wchar_t* title, const wchar_t* filter);
 std::wstring AskFolder(HWND parent, const wchar_t* title);
+
+// 应用包选择器（带复选框，含系统应用）；确定时回调勾选的包名（可多个）
+// showSystemDefault=false 时"显示系统应用"默认不勾（卸载这类命令用）
+void ShowPackagePicker(HWND parent, bool showSystemDefault,
+                       std::function<void(const std::vector<std::wstring>&)> onDone);
+
+// 参数面板（param_panel.cpp）：返回这一条命令需要的面板高度（已按 DPI 缩放）
+int ParamPanelHeight();
+
+// 文件夹内文件复选（与"整个文件夹"互斥的那一半）
+void ShowFileChecklist(HWND parent, const std::wstring& folder, std::vector<std::wstring>* out);
+
+// 三段式 shell 命令编辑器（命令下拉 + 参数复选 + 参数值 + 管道）
+bool ShowShellPipelineEditor(HWND parent, std::wstring* text);
+
+// 系统属性多选
+bool ShowPropPicker(HWND parent, std::wstring* text);
+
+// 截图取点：点击 / 滑动都在截图上用鼠标完成
+void ShowShotPicker(HWND parent, const adb::CommandSpec* spec, std::wstring* out);
+
+// 局域网扫描：列出本机网段 → 扫描在线主机 → 标出开着 adb 端口的，
+// 选中后把 "IP:端口" 写回 out（返回 true 表示选了）
+bool ShowLanScanner(HWND parent, std::wstring* out);
 
 }  // namespace adbgui

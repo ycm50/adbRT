@@ -22,10 +22,6 @@ constexpr FlagSpec kUninstallFlags[] = {
     {"keep", "-k", FlagKind::Toggle, nullptr, 0, false, false},
 };
 
-constexpr FlagSpec kRebootFlags[] = {
-    {"target", "{v}", FlagKind::Value, nullptr, 0, false, false},
-};
-
 constexpr FlagSpec kPushFlags[] = {
     {"sync", "--sync", FlagKind::Toggle, nullptr, 0, false, false},
 };
@@ -49,9 +45,9 @@ constexpr CommandSpec C(CommandId id, const char* key, GroupId g, uint16_t title
                         ParamKind pk, ParamSource ps, const char* pkey,
                         ExecKind ex, const FlagSpec* fl, uint8_t fn, const char* tmpl,
                         ParamKind pk2 = ParamKind::None, ParamSource ps2 = ParamSource::None,
-                        const char* pkey2 = nullptr) {
+                        const char* pkey2 = nullptr, bool pkgHideSystem = false) {
     return CommandSpec{id, key, g, title, 0, sel, dev, fb, dg, pk, ps, pkey,
-                       pk2, ps2, pkey2, ex, fl, fn, tmpl};
+                       pk2, ps2, pkey2, ex, fl, fn, tmpl, pkgHideSystem};
 }
 
 }  // namespace
@@ -65,18 +61,18 @@ static const CommandSpec kCommands[] = {
     C(1003, "device.info", GroupId::Device, 0, kSelNone, true, false, Danger::Safe,
       ParamKind::None, ParamSource::None, nullptr, ExecKind::Internal, nullptr, 0, nullptr),
     C(1004, "device.reboot", GroupId::Device, 0, kSelNone, true, false, Danger::Careful,
-      ParamKind::None, ParamSource::None, nullptr, ExecKind::CliPanel, kRebootFlags, 1,
-      "reboot {flags}"),
+      ParamKind::RebootTarget, ParamSource::None, "target", ExecKind::Cli, nullptr, 0,
+      "reboot {target?}"),
     C(1005, "device.tcpip", GroupId::Device, 0, kSelNone, true, false, Danger::Careful,
       ParamKind::Port, ParamSource::None, "port", ExecKind::Cli, nullptr, 0, "tcpip {port}"),
     C(1006, "device.connect", GroupId::Device, 0, kSelNone, false, false, Danger::Safe,
-      ParamKind::HostPort, ParamSource::None, "host", ExecKind::Cli, nullptr, 0,
+      ParamKind::LanHost, ParamSource::None, "host", ExecKind::Cli, nullptr, 0,
       "connect {host}"),
     C(1007, "device.pair", GroupId::Device, 0, kSelNone, false, false, Danger::Safe,
-      ParamKind::HostPort, ParamSource::None, "host", ExecKind::Cli, nullptr, 0,
-      "pair {host} {code}"),
+      ParamKind::LanHost, ParamSource::None, "host", ExecKind::Cli, nullptr, 0,
+      "pair {host} {code}", ParamKind::PairCode, ParamSource::None, "code"),
     C(1008, "device.disconnect", GroupId::Device, 0, kSelNone, false, false, Danger::Safe,
-      ParamKind::HostPort, ParamSource::None, "host", ExecKind::Cli, nullptr, 0,
+      ParamKind::LanHost, ParamSource::None, "host", ExecKind::Cli, nullptr, 0,
       "disconnect {host}"),
     C(1009, "device.root", GroupId::Device, 0, kSelNone, true, false, Danger::Careful,
       ParamKind::None, ParamSource::None, nullptr, ExecKind::Cli, nullptr, 0, "root"),
@@ -93,11 +89,12 @@ static const CommandSpec kCommands[] = {
       ParamKind::ApkFile, ParamSource::None, "apk", ExecKind::CliStream, kInstallFlags, 4,
       "install {flags} {apk}"),
     C(1102, "app.installMultiple", GroupId::App, 0, kSelApk | kSelFile, true, false,
-      Danger::Careful, ParamKind::LocalPaths, ParamSource::None, "apk", ExecKind::CliStream,
+      Danger::Careful, ParamKind::LocalFiles, ParamSource::None, "paths", ExecKind::CliStream,
       kMultiInstallFlags, 2, "install-multiple {flags} {paths}"),
     C(1103, "app.uninstall", GroupId::App, 0, kSelNone, true, false, Danger::Destructive,
       ParamKind::PackageName, ParamSource::InstalledPackagesAll, "pkg", ExecKind::Cli,
-      kUninstallFlags, 1, "uninstall {flags} {pkg}"),
+      kUninstallFlags, 1, "uninstall {flags} {pkg}",
+      ParamKind::None, ParamSource::None, nullptr, true),
     C(1104, "app.start", GroupId::App, 0, kSelNone, true, false, Danger::Safe,
       ParamKind::PackageName, ParamSource::InstalledPackages3p, "pkg", ExecKind::Cli, nullptr, 0,
       "shell monkey -p {pkg} -c android.intent.category.LAUNCHER 1"),
@@ -108,8 +105,8 @@ static const CommandSpec kCommands[] = {
       ParamKind::PackageName, ParamSource::InstalledPackages3p, "pkg", ExecKind::CliPanel,
       nullptr, 0, "shell pm clear {pkg}"),
     C(1107, "app.grant", GroupId::App, 0, kSelNone, true, false, Danger::Careful,
-      ParamKind::Permission, ParamSource::Permissions, "perm", ExecKind::Cli, nullptr, 0,
-      "shell pm grant {pkg} {perm}"),
+      ParamKind::PackageName, ParamSource::InstalledPackages3p, "pkg", ExecKind::Cli, nullptr, 0,
+      "shell pm grant {pkg} {perm}", ParamKind::Permission, ParamSource::Permissions, "perm"),
     C(1108, "app.list", GroupId::App, 0, kSelNone, true, false, Danger::Safe,
       ParamKind::None, ParamSource::None, nullptr, ExecKind::Internal, nullptr, 0, nullptr),
     C(1109, "app.pullApk", GroupId::App, 0, kSelNone, true, false, Danger::Safe,
@@ -118,20 +115,15 @@ static const CommandSpec kCommands[] = {
 
     // ------------------------------------------------------------ 文件
     C(1201, "file.push", GroupId::File, 0, kSelFile | kSelDir, true, false, Danger::Careful,
-      ParamKind::RemotePath, ParamSource::None, "remote", ExecKind::CliStream, kPushFlags, 1,
-      "push {flags} {paths} {remote}"),
+      ParamKind::LocalFiles, ParamSource::None, "paths", ExecKind::CliStream, kPushFlags, 1,
+      "push {flags} {paths} {remote}",
+      ParamKind::RemotePick, ParamSource::None, "remote"),
     C(1202, "file.pull", GroupId::File, 0, kSelNone, true, false, Danger::Safe,
-      ParamKind::RemotePath, ParamSource::None, "remote", ExecKind::CliStream, kPullFlags, 1,
-      "pull {flags} {remote} {local}"),
-    C(1203, "file.browse", GroupId::File, 0, kSelNone, true, false, Danger::Safe,
-      ParamKind::RemotePath, ParamSource::None, "remote", ExecKind::Internal, nullptr, 0, nullptr),
+      ParamKind::RemoteDyn, ParamSource::None, "remote", ExecKind::CliStream, kPullFlags, 1,
+      "pull {flags} {remote} {local}", ParamKind::LocalPaths, ParamSource::None, "local"),
     C(1204, "file.mkdir", GroupId::File, 0, kSelNone, true, false, Danger::Safe,
-      ParamKind::RemotePath, ParamSource::None, "remote", ExecKind::Cli, nullptr, 0,
+      ParamKind::RemotePick, ParamSource::None, "remote", ExecKind::Cli, nullptr, 0,
       "shell mkdir -p {remote}"),
-    C(1205, "file.delete", GroupId::File, 0, kSelNone, true, false, Danger::Destructive,
-      ParamKind::RemotePath, ParamSource::None, "remote", ExecKind::CliPanel, nullptr, 0,
-      "shell rm -rf {remote}"),
-
     // ------------------------------------------------------------ 屏幕与输入
     C(1301, "screen.capture", GroupId::Screen, 0, kSelNone, true, false, Danger::Safe,
       ParamKind::None, ParamSource::None, nullptr, ExecKind::Internal, nullptr, 0, nullptr),
@@ -143,17 +135,14 @@ static const CommandSpec kCommands[] = {
       "shell input tap {xy}"),
     C(1304, "input.swipe", GroupId::Screen, 0, kSelNone, true, false, Danger::Safe,
       ParamKind::Coords, ParamSource::None, "xys", ExecKind::Cli, nullptr, 0,
-      "shell input swipe {xys}"),
+      "shell input swipe {xys} {dur?}", ParamKind::Duration, ParamSource::None, "dur"),
     C(1305, "input.text", GroupId::Screen, 0, kSelNone, true, false, Danger::Safe,
       ParamKind::Text, ParamSource::None, "text", ExecKind::Cli, nullptr, 0,
       "shell input text {text}"),
-    C(1306, "input.key", GroupId::Screen, 0, kSelNone, true, false, Danger::Safe,
-      ParamKind::KeyCode, ParamSource::KeyEvents, "key", ExecKind::Cli, nullptr, 0,
-      "shell input keyevent {key}"),
 
     // ------------------------------------------------------------ Shell 与日志
     C(1401, "shell.run", GroupId::Shell, 0, kSelNone, true, false, Danger::Careful,
-      ParamKind::ShellCommand, ParamSource::None, "cmd", ExecKind::Cli, nullptr, 0,
+      ParamKind::ShellPipeline, ParamSource::None, "cmd", ExecKind::Cli, nullptr, 0,
       "shell {cmd}"),
     C(1402, "shell.terminal", GroupId::Shell, 0, kSelNone, true, false, Danger::Safe,
       ParamKind::None, ParamSource::None, nullptr, ExecKind::Internal, nullptr, 0, nullptr),
@@ -166,8 +155,8 @@ static const CommandSpec kCommands[] = {
       ParamKind::LocalPaths, ParamSource::None, "out", ExecKind::CliStream, nullptr, 0,
       "bugreport {out}"),
     C(1406, "shell.getprop", GroupId::Shell, 0, kSelNone, true, false, Danger::Safe,
-      ParamKind::PropKey, ParamSource::None, "prop", ExecKind::Cli, nullptr, 0,
-      "shell getprop {prop}"),
+      ParamKind::PropKeys, ParamSource::None, "prop", ExecKind::Cli, nullptr, 0,
+      "shell getprop {prop?}"),
 
     // ------------------------------------------------------------ Fastboot（专家模式）
     C(1501, "fb.devices", GroupId::Fastboot, 0, kSelNone, false, true, Danger::Safe,
@@ -258,16 +247,13 @@ const wchar_t* CommandTitle(const CommandSpec& spec) {
 
         {"file.push",          L"推送到设备\u2026"},
         {"file.pull",          L"从设备拉取\u2026"},
-        {"file.browse",        L"设备文件浏览\u2026"},
         {"file.mkdir",         L"新建目录\u2026"},
-        {"file.delete",        L"删除设备文件\u2026"},
 
         {"screen.capture",     L"截屏到本地"},
         {"screen.record",      L"录屏\u2026"},
         {"input.tap",          L"点击（x y）\u2026"},
         {"input.swipe",        L"滑动（x1 y1 x2 y2 ms）\u2026"},
         {"input.text",         L"输入文本\u2026"},
-        {"input.key",          L"按键\u2026"},
 
         {"shell.run",          L"执行 shell 命令\u2026"},
         {"shell.terminal",     L"打开交互终端"},
@@ -318,6 +304,14 @@ const wchar_t* ParamLabel(ParamKind kind) {
         case ParamKind::SlotName:     return L"槽位（a / b）";
         case ParamKind::Port:         return L"端口";
         case ParamKind::Coords:       return L"坐标（用空格分隔，如 640 1200）";
+        case ParamKind::LocalFiles:   return L"本机文件";
+        case ParamKind::RemotePick:   return L"设备目标";
+        case ParamKind::RemoteDyn:    return L"设备文件";
+        case ParamKind::RebootTarget: return L"重启目标";
+        case ParamKind::PropKeys:     return L"系统属性（可多选）";
+        case ParamKind::ShellPipeline:return L"命令（三段式，可用管道）";
+        case ParamKind::Duration:     return L"时长（毫秒，可留空）";
+        case ParamKind::LanHost:      return L"地址（IP:端口，可点「扫描局域网」挑设备）";
         default:                      return L"参数";
     }
 }
@@ -336,7 +330,6 @@ std::wstring FlagLabel(const FlagSpec& f) {
         {"size",      L"分辨率（如 1280x720）"},
         {"bitrate",   L"码率（如 8M）"},
         {"timelimit", L"时长上限（秒，最长 180）"},
-        {"target",    L"目标（recovery / bootloader / 留空=系统）"},
     };
     for (const auto& e : kFlags)
         if (std::strcmp(e.key, f.key) == 0) return e.label;
