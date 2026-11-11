@@ -111,6 +111,9 @@ int GetInt(const std::string& text, const std::string& key, int def) {
 // ------------------------------------------------------------------ 状态
 namespace {
 std::map<std::string, std::string> g_kv;    // key → JSON 字面量（字符串已含引号）
+// 配置是全局单例，UI 线程与后台线程都会读（AdbPath / CaptureDir / CurrentDevice 等）。
+// 没有这把锁时，一边 Reload 清 g_kv、一边查表，就是标准的迭代器失效崩溃。
+std::mutex g_kvMutex;
 std::wstring g_configPath;
 std::wstring g_note;
 uint64_t     g_lastLoad = 0;
@@ -135,6 +138,8 @@ Settings& Settings::Instance() {
 }
 
 std::wstring Settings::Path() const {
+    static std::mutex mu;
+    std::lock_guard<std::mutex> lk(mu);
     if (g_configPath.empty()) g_configPath = JoinPath(ConfigDirPath(), L"config.json");
     return g_configPath;
 }
@@ -145,6 +150,7 @@ void Settings::Reload(bool force) {
     uint64_t now = ::GetTickCount64();
     if (!force && g_lastLoad != 0 && now - g_lastLoad < 1000) return;
     g_lastLoad = now;
+    std::lock_guard<std::mutex> kvLock(g_kvMutex);
 
     std::wstring path = Path();
     std::string text;
@@ -207,6 +213,7 @@ void Settings::Reload(bool force) {
 }
 
 bool Settings::Save() {
+    std::lock_guard<std::mutex> lk(g_kvMutex);
     std::wstring path = Path();
     if (!EnsureDirectory(ParentOf(path))) return false;
 
@@ -235,6 +242,7 @@ bool Settings::Save() {
 }
 
 std::string Settings::GetString(const std::string& key, const std::string& def) const {
+    std::lock_guard<std::mutex> lk(g_kvMutex);
     auto it = g_kv.find(key);
     if (it == g_kv.end()) return def;
     const std::string& v = it->second;
@@ -244,6 +252,7 @@ std::string Settings::GetString(const std::string& key, const std::string& def) 
 }
 
 bool Settings::GetBool(const std::string& key, bool def) const {
+    std::lock_guard<std::mutex> lk(g_kvMutex);
     auto it = g_kv.find(key);
     if (it == g_kv.end()) return def;
     if (it->second == "true" || it->second == "1") return true;
@@ -252,29 +261,36 @@ bool Settings::GetBool(const std::string& key, bool def) const {
 }
 
 int Settings::GetInt(const std::string& key, int def) const {
+    std::lock_guard<std::mutex> lk(g_kvMutex);
     auto it = g_kv.find(key);
     if (it == g_kv.end()) return def;
     return atoi(it->second.c_str());
 }
 
 void Settings::SetString(const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> lk(g_kvMutex);
     g_kv[key] = "\"" + json::Escape(value) + "\"";
 }
 
 void Settings::SetBool(const std::string& key, bool value) {
+    std::lock_guard<std::mutex> lk(g_kvMutex);
     g_kv[key] = value ? "true" : "false";
 }
 
 void Settings::SetInt(const std::string& key, int value) {
+    std::lock_guard<std::mutex> lk(g_kvMutex);
     char buf[32];
     _snprintf_s(buf, sizeof(buf), _TRUNCATE, "%d", value);
     g_kv[key] = buf;
 }
 
-bool Settings::Has(const std::string& key) const { return g_kv.count(key) != 0; }
-size_t Settings::KeyCount() const { return g_kv.size(); }
+bool Settings::Has(const std::string& key) const {
+    std::lock_guard<std::mutex> lk(g_kvMutex); return g_kv.count(key) != 0; }
+size_t Settings::KeyCount() const {
+    std::lock_guard<std::mutex> lk(g_kvMutex); return g_kv.size(); }
 
 void Settings::ResetForTest() {
+    std::lock_guard<std::mutex> lk(g_kvMutex);
     g_kv.clear();
     g_configPath.clear();
     g_lastLoad = 0;

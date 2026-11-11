@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -28,6 +30,14 @@ namespace {
 constexpr const wchar_t* kPkgWndClass = L"AdbRTPkgPicker";
 constexpr UINT WM_LABEL_READY = WM_APP + 70;
 
+// 后台解析线程与窗口共享的状态。窗口先关时把 cancel 置位，
+// 线程拿着 shared_ptr，绝不会碰到已经 delete 的 PkgCtx。
+struct PkgState {
+    std::mutex mu;                        // 保护 all
+    std::vector<adb::AppLabel> all;       // 全部包（含解析后的名称）
+    std::atomic<bool> cancel{false};
+};
+
 struct PkgCtx {
     HWND hwnd = nullptr;
     HWND list = nullptr;
@@ -35,7 +45,7 @@ struct PkgCtx {
     HWND chkSystem = nullptr;
     HWND status = nullptr;
 
-    std::vector<adb::AppLabel>     all;    // 全部包（含解析后的名称）
+    std::shared_ptr<PkgState>      state;  // 与后台线程共享（见 PkgState）
     std::vector<int>               shown;  // 当前显示的行 → all 下标
     std::vector<std::wstring>      selected;
     bool  showSystem = true;
@@ -48,6 +58,7 @@ struct PkgCtx {
     std::function<void(const std::vector<std::wstring>&)> onDone;
 };
 
+
 // 数据下标 → 列表框行号（-1 表示当前没显示）
 int RowOfIndex(const PkgCtx* ctx, size_t index) {
     for (size_t r = 0; r < ctx->shown.size(); ++r)
@@ -57,10 +68,10 @@ int RowOfIndex(const PkgCtx* ctx, size_t index) {
 
 void UpdateStatus(PkgCtx* ctx) {
     int sys = 0, third = 0;
-    for (const auto& p : ctx->all) (p.system ? sys : third++);
+    for (const auto& p : ctx->state->all) (p.system ? sys : third++);
     SetTextOf(ctx->status,
               adb::Format(L"共 %zu 个应用（系统 %d / 第三方 %d）  显示 %zu  已勾选 %zu%s",
-                          ctx->all.size(), sys, third, ctx->shown.size(), ctx->selected.size(),
+                          ctx->state->all.size(), sys, third, ctx->shown.size(), ctx->selected.size(),
                           ctx->resolving.load() ? L"  · 正在读取应用名称…" : L""));
 }
 
@@ -90,8 +101,8 @@ void RefillList(PkgCtx* ctx) {
     ctx->shown.clear();
 
     std::wstring f = adb::ToLowerAscii(GetTextOf(ctx->filter));
-    for (size_t i = 0; i < ctx->all.size(); ++i) {
-        const auto& p = ctx->all[i];
+    for (size_t i = 0; i < ctx->state->all.size(); ++i) {
+        const auto& p = ctx->state->all[i];
         if (!ctx->showSystem && p.system) continue;
         if (!f.empty()) {
             std::wstring hay = adb::ToLowerAscii(p.package) + L" " + adb::ToLowerAscii(p.label);
@@ -101,7 +112,7 @@ void RefillList(PkgCtx* ctx) {
     }
 
     for (size_t row = 0; row < ctx->shown.size(); ++row) {
-        const auto& a = ctx->all[static_cast<size_t>(ctx->shown[row])];
+        const auto& a = ctx->state->all[static_cast<size_t>(ctx->shown[row])];
         LVITEMW item{};
         item.mask = LVIF_TEXT | LVIF_PARAM;
         item.iItem = static_cast<int>(row);
@@ -129,7 +140,7 @@ void CollectChecked(PkgCtx* ctx) {
         item.iItem = i;
         ::SendMessageW(ctx->list, LVM_GETITEMW, 0, reinterpret_cast<LPARAM>(&item));
         size_t idx = static_cast<size_t>(item.lParam);
-        if (idx < ctx->all.size()) ctx->selected.push_back(ctx->all[idx].package);
+        if (idx < ctx->state->all.size()) ctx->selected.push_back(ctx->state->all[idx].package);
     }
 }
 
@@ -155,8 +166,17 @@ std::vector<adb::AppLabel> LoadPackages(const std::wstring& serial) {
 }
 
 // 后台线程：给还没有名称的包逐个 pull + 解析，解析一个就通知界面刷新
+// 只在 shared state 上工作，窗口提前关掉也不会碰到悬垂指针
+struct ResolveArg {
+    HWND hwnd = nullptr;
+    std::shared_ptr<PkgState> state;
+};
+
 DWORD WINAPI ResolveLabelsProc(LPVOID param) {
-    auto* ctx = static_cast<PkgCtx*>(param);
+    std::unique_ptr<ResolveArg> arg(static_cast<ResolveArg*>(param));
+    std::shared_ptr<PkgState> st = arg->state;
+    HWND hwnd = arg->hwnd;
+
     auto& session = adb::DeviceSession::Instance();
     std::wstring serial = session.CurrentSerial();
     if (serial.empty()) return 0;
@@ -166,11 +186,17 @@ DWORD WINAPI ResolveLabelsProc(LPVOID param) {
     std::wstring local = adb::JoinPath(tmpDir, L"adbrt-label.apk");
 
     int resolved = 0;
-    for (size_t i = 0; i < ctx->all.size(); ++i) {
-        if (!ctx->resolving.load()) break;
-        if (!ctx->all[i].label.empty()) continue;
+    for (size_t i = 0;; ++i) {
+        if (st->cancel.load()) break;
+        std::wstring pkg;
+        {
+            std::lock_guard<std::mutex> lk(st->mu);
+            if (i >= st->all.size()) break;
+            if (!st->all[i].label.empty()) continue;
+            pkg = st->all[i].package;
+        }
 
-        std::wstring reply = session.Shell(L"pm path " + ctx->all[i].package, 10000);
+        std::wstring reply = session.Shell(L"pm path " + pkg, 10000);
         size_t pos = reply.find(L"package:");
         if (pos == std::wstring::npos) continue;
         size_t eol = reply.find(L'\n', pos);
@@ -180,6 +206,7 @@ DWORD WINAPI ResolveLabelsProc(LPVOID param) {
 
         adb::RunOptions opts;
         opts.timeoutMs = 30000;
+        opts.cancel = &st->cancel;
         auto pull = adb::RunProcess(session.AdbExe(),
                                     session.WithSerial({L"pull", remote, local}), opts);
         if (!pull.Ok()) continue;
@@ -187,18 +214,25 @@ DWORD WINAPI ResolveLabelsProc(LPVOID param) {
         std::wstring label = adb::ReadApkLabel(local);
         ::DeleteFileW(local.c_str());
         if (label.empty()) continue;
+        if (st->cancel.load()) break;
 
-        ctx->all[i].label = label;
+        {
+            std::lock_guard<std::mutex> lk(st->mu);
+            if (i < st->all.size()) st->all[i].label = label;
+        }
         ++resolved;
         auto* heap = new size_t(i);
-        if (!::PostMessageW(ctx->hwnd, WM_LABEL_READY, 0, reinterpret_cast<LPARAM>(heap)))
+        if (!::PostMessageW(hwnd, WM_LABEL_READY, 0, reinterpret_cast<LPARAM>(heap)))
             delete heap;
     }
 
-    adb::SaveLabelCache(serial, ctx->all);
+    {
+        std::lock_guard<std::mutex> lk(st->mu);
+        if (!st->cancel.load()) adb::SaveLabelCache(serial, st->all);
+    }
     adb::LogF(adb::LogLevel::Info, "picker", L"应用名称解析完成，新增 %d 个", resolved);
     auto* done = new size_t(0);
-    if (!::PostMessageW(ctx->hwnd, WM_LABEL_READY, 1, reinterpret_cast<LPARAM>(done)))
+    if (!::PostMessageW(hwnd, WM_LABEL_READY, 1, reinterpret_cast<LPARAM>(done)))
         delete done;
     return 0;
 }
@@ -256,16 +290,21 @@ LRESULT CALLBACK PkgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (HWND c : {ctx->filter, ctx->chkSystem, okBtn, cancelBtn, ctx->status})
                 ApplyFont(c, CreateUiFont(9, false));
 
-            ctx->all = LoadPackages(adb::DeviceSession::Instance().CurrentSerial());
+            ctx->state = std::make_shared<PkgState>();
+            ctx->state->all = LoadPackages(adb::DeviceSession::Instance().CurrentSerial());
             RefillList(ctx);
             ::SetWindowTextW(hwnd, L"选择应用（可勾选多个）");
 
             // 有缺名称的就在后台补
             bool needResolve = false;
-            for (const auto& a : ctx->all) if (a.label.empty()) { needResolve = true; break; }
+            for (const auto& a : ctx->state->all) if (a.label.empty()) { needResolve = true; break; }
             if (needResolve) {
                 ctx->resolving = true;
-                ctx->resolveThread = ::CreateThread(nullptr, 0, ResolveLabelsProc, ctx, 0, nullptr);
+                auto* arg = new ResolveArg{ctx->hwnd, ctx->state};
+                DWORD tid = 0;
+                HANDLE th = ::CreateThread(nullptr, 0, ResolveLabelsProc, arg, 0, &tid);
+                if (th) ::CloseHandle(th);      // 线程对象结束后由系统回收
+                else { delete arg; ctx->resolving = false; }
                 UpdateStatus(ctx);
             }
             return 0;
@@ -276,9 +315,16 @@ LRESULT CALLBACK PkgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             bool finished = wp == 1;
             if (!finished) {
                 size_t i = *idx;
-                if (i < ctx->all.size()) {
+                adb::AppLabel item;
+                bool found = false;
+                {
+                    // 只在锁里拷一份，发控件消息放到锁外 —— 持锁调用窗口消息是隐患
+                    std::lock_guard<std::mutex> lk(ctx->state->mu);
+                    if (i < ctx->state->all.size()) { item = ctx->state->all[i]; found = true; }
+                }
+                if (found) {
                     int row = RowOfIndex(ctx, i);
-                    if (row >= 0) FillRow(ctx, row, ctx->all[i]);
+                    if (row >= 0) FillRow(ctx, row, item);
                 }
                 delete idx;
             } else {
@@ -332,11 +378,15 @@ LRESULT CALLBACK PkgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DESTROY: {
             auto* c = reinterpret_cast<PkgCtx*>(::GetWindowLongPtrW(hwnd, GWLP_USERDATA));
             if (c) {
+                ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                // 后台线程只持有 shared state 与 hwnd 数值，
+                // 这里置位取消后立刻释放窗口上下文是安全的：
+                // 线程后续的 PostMessage 会因为窗口已销毁而失败，指针不会被解引用。
                 c->resolving = false;
+                if (c->state) c->state->cancel = true;
                 if (!c->done) c->selected.clear();
                 if (c->onDone) c->onDone(c->selected);
                 delete c;
-                ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             }
             return 0;
         }

@@ -46,7 +46,8 @@ enum class ParamKind : uint8_t {
     PropKeys,      // 系统属性（多选复选框，展开成多条 getprop）
     ShellPipeline, // 三段式 shell 命令（自定义编辑器 + 管道）
     Duration,      // 毫秒数（滑动时长），可为空
-    LanHost        // 局域网地址：可手填，也可点「扫描局域网」挑一台
+    LanHost,       // 局域网地址：可手填，也可点「扫描局域网」挑一台
+    DeviceSerial   // 从 adb devices 列的设备里选一台（写回序列号）
 };
 
 enum class ParamSource : uint8_t {

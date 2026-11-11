@@ -33,27 +33,42 @@ std::vector<DeviceEntry> DeviceSession::ListFastboot() {
 }
 
 std::wstring DeviceSession::CurrentSerial() {
-    if (!m_serialLoaded) {
-        m_serial = Settings::Instance().CurrentDevice();
-        m_serialLoaded = true;
+    {
+        std::lock_guard<std::mutex> lk(m_mu);
+        if (!m_serialLoaded) {
+            m_serial = Settings::Instance().CurrentDevice();
+            m_serialLoaded = true;
+        }
+        if (!m_serial.empty()) return m_serial;
     }
-    if (!m_serial.empty()) return m_serial;
 
+    // 自动选中只在线程外做一次；ListAdb 会起进程，不能持锁调用
     auto devices = ListAdb();
     std::vector<DeviceEntry> online;
     for (const auto& d : devices)
         if (d.state == DeviceState::Device) online.push_back(d);
-    if (online.size() == 1) {
-        m_serial = online.front().serial;
-        Settings::Instance().SetCurrentDevice(m_serial);
-        Settings::Instance().Save();
+    if (online.size() != 1) {
+        std::lock_guard<std::mutex> lk(m_mu);
+        return m_serial;
     }
-    return m_serial;
+
+    std::wstring tentative = online.front().serial;
+    {
+        std::lock_guard<std::mutex> lk(m_mu);
+        if (!m_serial.empty()) return m_serial;   // 别的线程抢先定了
+        m_serial = tentative;
+    }
+    Settings::Instance().SetCurrentDevice(tentative);
+    Settings::Instance().Save();
+    return tentative;
 }
 
 void DeviceSession::SetCurrentSerial(const std::wstring& serial) {
-    m_serial = serial;
-    m_serialLoaded = true;
+    {
+        std::lock_guard<std::mutex> lk(m_mu);
+        m_serial = serial;
+        m_serialLoaded = true;
+    }
     Settings::Instance().SetCurrentDevice(serial);
     Settings::Instance().Save();
 }
@@ -128,10 +143,15 @@ std::wstring DeviceSession::DeviceSummary() {
 }
 
 std::vector<std::wstring> DeviceSession::WithSerial(const std::vector<std::wstring>& args) const {
-    if (m_serial.empty()) return args;
+    std::wstring serial;
+    {
+        std::lock_guard<std::mutex> lk(m_mu);
+        serial = m_serial;
+    }
+    if (serial.empty()) return args;
     std::vector<std::wstring> out;
     out.push_back(L"-s");
-    out.push_back(m_serial);
+    out.push_back(serial);
     out.insert(out.end(), args.begin(), args.end());
     return out;
 }

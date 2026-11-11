@@ -44,12 +44,19 @@ std::wstring SelectedText(HWND list) {
 // ============================================================ 只读文本窗口
 constexpr const wchar_t* kTextWndClass = L"AdbRTTextView";
 
+// 后台加载线程与窗口共享的最小状态：窗口销毁后线程只看这个，
+// 不碰 TextWin（它随时可能被 delete）。
+struct TextShared {
+    std::atomic<bool> cancelled{false};
+    HWND hwnd = nullptr;
+};
+
 struct TextWin {
     std::wstring title;
     std::wstring body;                 // 立即可显示的内容（可为占位）
     std::function<std::wstring()> loader;   // 非空 = 后台线程算完再替换
     HWND  hwnd = nullptr;
-    std::atomic<bool> cancelled{false};
+    std::shared_ptr<TextShared> shared;     // 与后台线程共享
 };
 
 constexpr UINT WM_APP_TEXT_READY = WM_APP + 60;
@@ -59,13 +66,19 @@ struct LoadResult {
     std::wstring text;
 };
 
+struct TextArg {
+    std::shared_ptr<TextShared> shared;
+    std::function<std::wstring()> loader;
+    HWND hwnd = nullptr;
+};
+
 DWORD WINAPI TextLoaderProc(LPVOID param) {
-    auto* ctx = static_cast<TextWin*>(param);
+    std::unique_ptr<TextArg> arg(static_cast<TextArg*>(param));
     std::wstring result;
-    if (ctx->loader) result = ctx->loader();
-    if (ctx->cancelled.load() || !ctx->hwnd) return 0;
-    auto* heap = new LoadResult{ctx->hwnd, std::move(result)};
-    if (!::PostMessageW(ctx->hwnd, WM_APP_TEXT_READY, 0, reinterpret_cast<LPARAM>(heap)))
+    if (arg->loader) result = arg->loader();
+    if (arg->shared->cancelled.load() || !arg->shared->hwnd) return 0;
+    auto* heap = new LoadResult{arg->hwnd, std::move(result)};
+    if (!::PostMessageW(arg->hwnd, WM_APP_TEXT_READY, 0, reinterpret_cast<LPARAM>(heap)))
         delete heap;
     return 0;
 }
@@ -84,7 +97,13 @@ LRESULT CALLBACK TextProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ApplyFont(edit, CreateUiFont(9, true));
             ::SetWindowTextW(hwnd, ctx->title.c_str());
             if (ctx->loader) {
-                ::CreateThread(nullptr, 0, TextLoaderProc, ctx, 0, nullptr);
+                ctx->shared = std::make_shared<TextShared>();
+                ctx->shared->hwnd = hwnd;
+                auto* arg = new TextArg{ctx->shared, ctx->loader, hwnd};
+                DWORD tid = 0;
+                HANDLE th = ::CreateThread(nullptr, 0, TextLoaderProc, arg, 0, &tid);
+                if (th) ::CloseHandle(th);
+                else delete arg;
             }
             return 0;
         }
@@ -106,7 +125,7 @@ LRESULT CALLBACK TextProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CLOSE: ::DestroyWindow(hwnd); return 0;
         case WM_DESTROY:
             if (ctx) {
-                ctx->cancelled = true;
+                if (ctx->shared) ctx->shared->cancelled = true;
                 ctx->hwnd = nullptr;
                 ::Sleep(80);          // 给后台线程一点时间看到 cancelled
             }
@@ -136,7 +155,7 @@ void EnsureTextClass(HINSTANCE hinst) {
 // ------------------------------------------------------------------ 文本窗口
 void ShowTextView(HWND parent, const std::wstring& title, const std::wstring& text) {
     EnsureTextClass(InstOf(parent));
-    auto* ctx = new TextWin{title, text, nullptr, nullptr, false};
+    auto* ctx = new TextWin{title, text, nullptr, nullptr, nullptr};
     HWND hwnd = ::CreateWindowExW(WS_EX_APPWINDOW, kTextWndClass, title.c_str(),
                                   WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                   900, 600, parent, nullptr, InstOf(parent), ctx);
@@ -148,7 +167,7 @@ void ShowTextView(HWND parent, const std::wstring& title, const std::wstring& te
 void ShowTextViewAsync(HWND parent, const std::wstring& title, const std::wstring& placeholder,
                        std::function<std::wstring()> loader) {
     EnsureTextClass(InstOf(parent));
-    auto* ctx = new TextWin{title, placeholder, std::move(loader), nullptr, false};
+    auto* ctx = new TextWin{title, placeholder, std::move(loader), nullptr, nullptr};
     HWND hwnd = ::CreateWindowExW(WS_EX_APPWINDOW, kTextWndClass, title.c_str(),
                                   WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
                                   900, 600, parent, nullptr, InstOf(parent), ctx);

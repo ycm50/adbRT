@@ -1,18 +1,57 @@
 #include "ui_util.h"
 
+#include <map>
+#include <mutex>
+
 #include "../core/core.h"
+#include "theme.h"
 
 namespace adbgui {
 
+namespace {
+
+// 字体缓存：CreateUiFont 在每次开窗时都会被调用，
+// 原来每次都 CreateFontIndirectW 且从不删除 —— 用久了 GDI 对象会一直涨。
+// 字号 + 字体族是有限组合，缓存起来既省句柄也省时间。
+struct FontKey {
+    int  pt = 0;
+    bool mono = false;
+    bool operator<(const FontKey& o) const {
+        if (pt != o.pt) return pt < o.pt;
+        return mono < o.mono;
+    }
+};
+
+std::map<FontKey, HFONT>& Fonts() {
+    static std::map<FontKey, HFONT> m;
+    return m;
+}
+std::mutex& FontMutex() {
+    static std::mutex m;
+    return m;
+}
+
+}  // namespace
+
 HFONT CreateUiFont(int pt, bool mono) {
+    {
+        std::lock_guard<std::mutex> lk(FontMutex());
+        auto it = Fonts().find(FontKey{pt, mono});
+        if (it != Fonts().end()) return it->second;
+    }
+
     LOGFONTW lf{};
-    lf.lfHeight = -::MulDiv(pt, 96, 72);
+    lf.lfHeight = -::MulDiv(pt, theme::Dpi(96), 72);
     lf.lfWeight = FW_NORMAL;
     lf.lfCharSet = DEFAULT_CHARSET;
     lf.lfQuality = CLEARTYPE_QUALITY;
     const wchar_t* face = mono ? L"Consolas" : L"Microsoft YaHei UI";
     lstrcpynW(lf.lfFaceName, face, LF_FACESIZE);
-    return ::CreateFontIndirectW(&lf);
+    HFONT f = ::CreateFontIndirectW(&lf);
+
+    std::lock_guard<std::mutex> lk(FontMutex());
+    Fonts()[FontKey{pt, mono}] = f;
+    return f;
 }
 
 void ApplyFont(HWND control, HFONT font) {

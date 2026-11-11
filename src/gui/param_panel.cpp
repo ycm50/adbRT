@@ -206,6 +206,14 @@ std::wstring RebootTargetArg(const std::wstring& picked) {
     return picked;
 }
 
+// 从 adb devices 取设备序列号，顺便把状态标出来（offline 的不能选）
+std::vector<std::wstring> ListDeviceSerials() {
+    std::vector<std::wstring> out;
+    for (const auto& d : adb::DeviceSession::Instance().ListAdb())
+        out.push_back(d.serial);
+    return out;
+}
+
 // 推送 / 新建目录的根目录
 const std::vector<std::wstring>& RemoteRoots() {
     static const std::vector<std::wstring> k = {L"/sdcard", L"/tmp"};
@@ -370,6 +378,18 @@ int BuildParamBlock(HWND host, const adb::CommandSpec* spec, bool second, int y)
             y += 32;
             break;
         }
+        case adb::ParamKind::DeviceSerial: {
+            // 直接列 adb devices 的结果：无线设备是 "ip:端口"，USB 是序列号
+            std::vector<std::wstring> items = ListDeviceSerials();
+            HWND combo = MakeCombo(host, left, y, 420, IDC_COMBO_PARAM);
+            FillCombo(combo, items, items.empty() ? L"" : items.front());
+            g_panel.kind = kind;
+            g_panel.combo = combo;
+            g_params.push_back({combo, key, kind, adb::FlagKind::Value});
+            MakeButton(host, L"刷新设备…", left + 426, y, 96, btnId);
+            y += 30;
+            break;
+        }
         case adb::ParamKind::Duration: {
             // 毫秒数：可留空（留空时 adb 用系统默认时长）
             HWND edit = MakeEdit(host, left, y, 160, editId, false);
@@ -497,6 +517,17 @@ void BrowseForParam(HWND host, const adb::CommandSpec* spec, bool second) {
             if (g_panel.summary) SetTextOf(g_panel.summary, picked);
             UpdatePreview();
         }
+        return;
+    }
+    if (kind == adb::ParamKind::DeviceSerial) {
+        // 「刷新设备…」：重新问一次 adb devices
+        g_panel.remoteRel.clear();
+        std::vector<std::wstring> items = ListDeviceSerials();
+        if (g_panel.combo) {
+            std::wstring cur = adb::Trim(ComboText(g_panel.combo));
+            FillCombo(g_panel.combo, items, cur);
+        }
+        UpdatePreview();
         return;
     }
     if (kind == adb::ParamKind::ImageFile) {
@@ -749,6 +780,7 @@ bool ReadParamPanel(adb::BuildInput* in, std::wstring* error) {
             case adb::ParamKind::SlotName:
             case adb::ParamKind::Partition:
             case adb::ParamKind::Permission:
+            case adb::ParamKind::DeviceSerial:
                 v = adb::Trim(ComboText(ref.hwnd));
                 break;
             case adb::ParamKind::RemotePick: {

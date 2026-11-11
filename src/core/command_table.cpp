@@ -71,8 +71,10 @@ static const CommandSpec kCommands[] = {
     C(1007, "device.pair", GroupId::Device, 0, kSelNone, false, false, Danger::Safe,
       ParamKind::LanHost, ParamSource::None, "host", ExecKind::Cli, nullptr, 0,
       "pair {host} {code}", ParamKind::PairCode, ParamSource::None, "code"),
+    // 断开只对无线（ip:端口）设备有意义，但列表直接来自 adb devices，
+    // 用户能看到全部设备及其状态，不会对着空输入框发呆
     C(1008, "device.disconnect", GroupId::Device, 0, kSelNone, false, false, Danger::Safe,
-      ParamKind::LanHost, ParamSource::None, "host", ExecKind::Cli, nullptr, 0,
+      ParamKind::DeviceSerial, ParamSource::Devices, "host", ExecKind::Cli, nullptr, 0,
       "disconnect {host}"),
     C(1009, "device.root", GroupId::Device, 0, kSelNone, true, false, Danger::Careful,
       ParamKind::None, ParamSource::None, nullptr, ExecKind::Cli, nullptr, 0, "root"),
@@ -229,7 +231,7 @@ const wchar_t* CommandTitle(const CommandSpec& spec) {
         {"device.tcpip",       L"开启无线调试（tcpip）"},
         {"device.connect",     L"连接无线设备\u2026"},
         {"device.pair",        L"配对无线调试\u2026"},
-        {"device.disconnect",  L"断开无线设备\u2026"},
+        {"device.disconnect",  L"断开设备\u2026"},
         {"device.root",        L"root（需要 userdebug）"},
         {"device.unroot",      L"unroot"},
         {"device.reconnect",   L"重连设备"},
@@ -312,6 +314,7 @@ const wchar_t* ParamLabel(ParamKind kind) {
         case ParamKind::ShellPipeline:return L"命令（三段式，可用管道）";
         case ParamKind::Duration:     return L"时长（毫秒，可留空）";
         case ParamKind::LanHost:      return L"地址（IP:端口，可点「扫描局域网」挑设备）";
+        case ParamKind::DeviceSerial: return L"设备";
         default:                      return L"参数";
     }
 }

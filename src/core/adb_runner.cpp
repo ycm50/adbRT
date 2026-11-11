@@ -1,6 +1,8 @@
 #include "adb_runner.h"
 
 #include <algorithm>
+#include <memory>
+#include <mutex>
 
 namespace adb {
 
@@ -28,23 +30,45 @@ std::wstring QuoteOne(const std::wstring& arg) {
     return out;
 }
 
-struct ReadCtx {
-    HANDLE pipe = INVALID_HANDLE_VALUE;
-    bool   isStderr = false;
-    std::string* collect = nullptr;
-    LineSink* sink = nullptr;
+// 一条管道的共享状态。读线程和调用方各持一份 shared_ptr：
+// 即使进程在超时内没退干净，也不会有人踩到已经释放的内存。
+struct PipeShared {
+    std::mutex        mu;
+    std::string       text;                       // 累积输出（受 mu 保护）
+    std::atomic<bool> stop{false};                // sink 要求中止
+    std::atomic<bool> finished{false};            // 读线程已收工
+    HANDLE            pipe = INVALID_HANDLE_VALUE;
+    bool              isStderr = false;
+    LineSink          sink;
     std::atomic<bool>* cancel = nullptr;
-    std::atomic<bool>* stop = nullptr;
-    std::mutex* sinkMutex = nullptr;
+    std::mutex*       sinkMutex = nullptr;
+};
+
+struct ReaderArg {
+    std::shared_ptr<PipeShared> sp;
 };
 
 DWORD WINAPI ReaderThread(LPVOID param) {
-    auto* ctx = static_cast<ReadCtx*>(param);
+    std::unique_ptr<ReaderArg> arg(static_cast<ReaderArg*>(param));
+    std::shared_ptr<PipeShared> sp = arg->sp;
+
+    auto emit = [&sp](const std::string& line) {
+        {
+            std::lock_guard<std::mutex> lk(sp->mu);
+            sp->text.append(line);
+            sp->text.append("\n");
+        }
+        if (sp->sink) {
+            std::lock_guard<std::mutex> lk(*sp->sinkMutex);
+            if (!sp->sink(line, sp->isStderr)) sp->stop = true;
+        }
+    };
+
     char buf[4096];
     std::string pending;
     for (;;) {
         DWORD got = 0;
-        BOOL ok = ::ReadFile(ctx->pipe, buf, sizeof(buf), &got, nullptr);
+        BOOL ok = ::ReadFile(sp->pipe, buf, sizeof(buf), &got, nullptr);
         if (!ok || got == 0) break;
         pending.append(buf, got);
         size_t pos;
@@ -52,25 +76,27 @@ DWORD WINAPI ReaderThread(LPVOID param) {
             std::string line = pending.substr(0, pos);
             pending.erase(0, pos + 1);
             if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (ctx->collect) {
-                ctx->collect->append(line);
-                ctx->collect->append("\n");
-            }
-            if (ctx->sink && *ctx->sink) {
-                std::lock_guard<std::mutex> lk(*ctx->sinkMutex);
-                if (!(*ctx->sink)(line, ctx->isStderr) && ctx->stop) *ctx->stop = true;
-            }
+            emit(line);
         }
-        if (ctx->cancel && *ctx->cancel) break;
+        if (sp->stop.load()) break;
+        if (sp->cancel && sp->cancel->load()) break;
     }
-    if (!pending.empty()) {
-        if (ctx->collect) { ctx->collect->append(pending); ctx->collect->append("\n"); }
-        if (ctx->sink && *ctx->sink) {
-            std::lock_guard<std::mutex> lk(*ctx->sinkMutex);
-            (*ctx->sink)(pending, ctx->isStderr);
-        }
-    }
+    if (!pending.empty()) emit(pending);
+
+    if (sp->pipe != INVALID_HANDLE_VALUE) ::CloseHandle(sp->pipe);
+    sp->pipe = INVALID_HANDLE_VALUE;
+    sp->finished = true;
     return 0;
+}
+
+// 起读线程；句柄立刻关掉（线程对象在线程结束后由系统回收）
+bool StartReader(const std::shared_ptr<PipeShared>& sp) {
+    auto* arg = new ReaderArg{sp};
+    DWORD tid = 0;
+    HANDLE th = ::CreateThread(nullptr, 0, ReaderThread, arg, 0, &tid);
+    if (!th) { delete arg; return false; }
+    ::CloseHandle(th);
+    return true;
 }
 
 }  // namespace
@@ -90,15 +116,26 @@ RunResult RunProcess(const std::wstring& exe, const std::vector<std::wstring>& a
         return result;
     }
 
-    uint64_t t0 = ::GetTickCount64();
+    const uint64_t t0 = ::GetTickCount64();
 
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
 
     HANDLE outRead = nullptr, outWrite = nullptr, errRead = nullptr, errWrite = nullptr;
+
+    // 两次 CreatePipe 只要有一处失败，前面建好的句柄必须关掉，
+    // 否则每失败一次就漏两个句柄，句柄耗尽后整个程序就起不了进程了。
+    auto closePipes = [&]() {
+        HANDLE* all[] = {&outRead, &outWrite, &errRead, &errWrite};
+        for (HANDLE* h : all) {
+            if (*h) { ::CloseHandle(*h); *h = nullptr; }
+        }
+    };
+
     if (!::CreatePipe(&outRead, &outWrite, &sa, 0) ||
         !::CreatePipe(&errRead, &errWrite, &sa, 0)) {
+        closePipes();
         result.error = L"创建管道失败";
         return result;
     }
@@ -125,12 +162,12 @@ RunResult RunProcess(const std::wstring& exe, const std::vector<std::wstring>& a
                                     cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
     ::CloseHandle(outWrite);
     ::CloseHandle(errWrite);
+    outWrite = errWrite = nullptr;
 
     if (!created) {
         DWORD err = ::GetLastError();
         result.error = Format(L"启动失败：%ls（错误码 %lu）", exe.c_str(), err);
-        ::CloseHandle(outRead);
-        ::CloseHandle(errRead);
+        closePipes();
         return result;
     }
 
@@ -146,20 +183,27 @@ RunResult RunProcess(const std::wstring& exe, const std::vector<std::wstring>& a
     ::ResumeThread(pi.hThread);
     ::CloseHandle(pi.hThread);
 
-    std::atomic<bool> stopFlag{false};
     std::mutex sinkMutex;
-    std::string errBuf;
 
-    ReadCtx outCtx{outRead, false, &result.stdoutUtf8, const_cast<LineSink*>(&opts.sink),
-                   opts.cancel, &stopFlag, &sinkMutex};
-    ReadCtx errCtx{errRead, true, &errBuf, const_cast<LineSink*>(&opts.sink),
-                   opts.cancel, &stopFlag, &sinkMutex};
+    auto outShared = std::make_shared<PipeShared>();
+    outShared->pipe = outRead;
+    outShared->isStderr = false;
+    outShared->sink = opts.sink;
+    outShared->cancel = opts.cancel;
+    outShared->sinkMutex = &sinkMutex;
 
-    HANDLE t1 = ::CreateThread(nullptr, 0, ReaderThread, &outCtx, 0, nullptr);
-    HANDLE t2 = ::CreateThread(nullptr, 0, ReaderThread, &errCtx, 0, nullptr);
+    auto errShared = std::make_shared<PipeShared>();
+    errShared->pipe = errRead;
+    errShared->isStderr = true;
+    errShared->sink = opts.sink;
+    errShared->cancel = opts.cancel;
+    errShared->sinkMutex = &sinkMutex;
+
+    if (!StartReader(outShared)) { ::CloseHandle(outRead); outShared->pipe = INVALID_HANDLE_VALUE; }
+    if (!StartReader(errShared)) { ::CloseHandle(errRead); errShared->pipe = INVALID_HANDLE_VALUE; }
 
     DWORD waitMs = opts.timeoutMs ? opts.timeoutMs : INFINITE;
-    DWORD wr = ::WaitForSingleObject(pi.hProcess, waitMs == INFINITE ? INFINITE : waitMs);
+    DWORD wr = ::WaitForSingleObject(pi.hProcess, waitMs);
     if (wr == WAIT_TIMEOUT) {
         result.cancelled = true;
         if (job) ::TerminateJobObject(job, 1);
@@ -167,7 +211,8 @@ RunResult RunProcess(const std::wstring& exe, const std::vector<std::wstring>& a
     }
 
     // 用户取消
-    while (opts.cancel && opts.cancel->load() && ::WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT) {
+    while (opts.cancel && opts.cancel->load() &&
+           ::WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT) {
         result.cancelled = true;
         if (job) ::TerminateJobObject(job, 1);
         else ::TerminateProcess(pi.hProcess, 1);
@@ -179,16 +224,25 @@ RunResult RunProcess(const std::wstring& exe, const std::vector<std::wstring>& a
     ::GetExitCodeProcess(pi.hProcess, &exitCode);
     result.exitCode = exitCode;
 
-    ::WaitForSingleObject(t1, 3000);
-    ::WaitForSingleObject(t2, 3000);
-    ::CloseHandle(t1);
-    ::CloseHandle(t2);
-    ::CloseHandle(outRead);
-    ::CloseHandle(errRead);
     ::CloseHandle(pi.hProcess);
     if (job) ::CloseHandle(job);
 
-    result.stderrUtf8 = errBuf;
+    // 子进程退出 → 写端全关 → ReadFile 返回 0 → 读线程收尾。
+    // 给它们最多 1 秒把最后几行落进 shared；超时也不阻塞主流程
+    // （shared_ptr 保证这时候读数据是安全的）。
+    for (int i = 0; i < 100; ++i) {
+        if (outShared->finished.load() && errShared->finished.load()) break;
+        ::Sleep(10);
+    }
+    {
+        std::lock_guard<std::mutex> lk(outShared->mu);
+        result.stdoutUtf8 = outShared->text;
+    }
+    {
+        std::lock_guard<std::mutex> lk(errShared->mu);
+        result.stderrUtf8 = errShared->text;
+    }
+
     result.elapsedMs = ::GetTickCount64() - t0;
     return result;
 }
