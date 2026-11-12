@@ -38,7 +38,7 @@
 ### 用发布包装
 
 ```powershell
-pwsh -File install.ps1                                   # 装到当前目录
+pwsh -File install.ps1                                   # 默认装到 <脚本所在盘>:\adbRT
 pwsh -File install.ps1 -InstallDir D:\tools\AdbRT        # 指定位置（绝对或相对都行）
 pwsh -File install.ps1 -NoPath                           # 不动用户 PATH
 pwsh -File install.ps1 -NoDesktop                        # 不建桌面快捷方式
@@ -105,7 +105,7 @@ src/core/      命令表、argv 构造、进程封装、adb 输出解析、设�
 src/gui/       Win32 GUI：主窗口、参数面板、主题、对话框、内置窗口、CLI、自检
 src/tests/     无窗口单元测试（158 项）+ adb 桩
 cmake/         身份与版本派生（唯一真相源 packaging/identity.json）
-packaging/     identity.json、assets（svg/png/ico）、install/uninstall/build-release
+packaging/     identity.json、assets（svg/png/ico）、install/uninstall/build-release/collect-runtime-deps
 tools/         gen-icon.mjs（SVG + PNG/ICO 生成）、test-real-device.ps1（真机全量）
 docs/          产品设计 / 技术实现设计 / 测试与实测记录 / 发布流程
 .github/       手动触发的 build → package → release

@@ -100,7 +100,11 @@ jobs:
 
       - name: 组装发布包
         shell: pwsh
-        run: pwsh -NoProfile -File packaging/scripts/build-release.ps1 -Config Release
+        run: |
+          # 运行时 DLL 必须取「本次构建配套」的那一份：显式传入工具链 bin，
+          # 不要依赖 runner 上 PATH 的巧合顺序（PATH 里可能有别处的同名副本）。
+          $toolBin = Split-Path -Parent (Get-Command g++.exe -ErrorAction Stop).Source
+          pwsh -NoProfile -File packaging/scripts/build-release.ps1 -Config Release -ToolBin $toolBin
 
       - name: 上传发布包
         uses: actions/upload-artifact@v4

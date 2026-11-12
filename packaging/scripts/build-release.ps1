@@ -7,7 +7,9 @@
 [CmdletBinding()]
 param(
     [ValidateSet("Debug","Release")][string]$Config = "Release",
-    [string]$BuildDir = ""
+    [string]$BuildDir = "",
+    # 含 objdump.exe 的目录（MinGW 工具链 bin）。留空则从 PATH / UCRT_PATH 里找
+    [string]$ToolBin = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +33,19 @@ New-Item -ItemType Directory -Force -Path (Join-Path $stage "app\icons") | Out-N
 
 Write-Host "==> 归集 $Config 产物" -ForegroundColor Cyan
 Copy-Item $exe (Join-Path $stage "app\AdbRT.exe") -Force
+
+# 运行库：MSYS2 UCRT64 默认动态链接 libstdc++-6 / libgcc_s_seh-1 / libwinpthread-1。
+# Windows 不自带这三个，而用户 PATH 里常有别人的同名副本（版本不一致就
+# 0xC0000139 起不来），所以把「本次构建配套的那一份」原样放进 app\，
+# 与 exe 同目录的 DLL 优先于 PATH 搜索。
+Write-Host "==> 收集运行时 DLL" -ForegroundColor Cyan
+$collectArgs = @{
+    Exe = $exe
+    Out = (Join-Path $stage "app")
+}
+if ($ToolBin) { $collectArgs.ToolBin = $ToolBin }
+& (Join-Path $PSScriptRoot "collect-runtime-deps.ps1") @collectArgs
+if ($LASTEXITCODE -ne 0) { throw "收集运行时 DLL 失败" }
 $assets = Join-Path $root "packaging\assets"
 foreach ($f in @("adbrt.ico","adbrt.png","adbrt.svg")) {
     $p = Join-Path $assets $f
@@ -50,6 +65,7 @@ AdbRT $version —— Android 平台工具（adb / fastboot）的 Windows 图形
 安装（不会写注册表）：
     pwsh -File install.ps1
     pwsh -File install.ps1 -InstallDir D:\tools\AdbRT    # 指定位置（绝对或相对都行）
+    # 不指定 -InstallDir 时默认装到 <脚本所在盘>:\adbRT
     pwsh -File install.ps1 -NoPath                        # 不改用户 PATH
 
 卸载：
