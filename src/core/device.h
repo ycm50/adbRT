@@ -36,6 +36,10 @@ public:
     // 便捷查询（失败返回空）
     std::wstring Shell(const std::wstring& cmd, uint32_t timeoutMs = 15000);
     std::vector<PackageEntry> InstalledPackages(bool includeSystem);
+
+    // 一次 adb 调用拿到「包名 + APK 路径」（pm list packages -f）。
+    // 读取应用名称必须先有路径，逐包执行 pm path 会多出几百次往返。
+    std::vector<PackageEntry> InstalledPackagesWithPaths(bool includeSystem);
     std::vector<std::wstring> Partitions();
     std::wstring DeviceSummary();
 

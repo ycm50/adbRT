@@ -17,11 +17,21 @@
 #include <mutex>
 #include <thread>
 
+#include "adb_mdns.h"
 #include "core.h"
 #include "device.h"
 #include "parsers.h"
 
 namespace adb {
+
+// 扫描时的 adb 端口候选。
+//   · 5555     —— "adb tcpip 5555" 的老式无线调试（仍然是最常见的一种）
+//   · 5037     —— adb server 端口（个别设备/盒子直接暴露）
+//   · 37221 等 —— Android 11+「无线调试」模块常见的随机端口段起点
+// 真正常用的随机端口由 mDNS 报出来，在 ScanLan 里合并进来。
+std::vector<int> DefaultAdbPortCandidates() {
+    return {5555, 37221, 5556, 5557, 5037};
+}
 
 namespace {
 
@@ -407,44 +417,18 @@ bool DeviceReady(const std::wstring& endpoint) {
     return false;
 }
 
-std::wstring FindAdbEndpoint(const std::wstring& ip, int timeoutMs,
-                             std::atomic<bool>* cancel) {
-    if (ip.empty()) return {};
+namespace {
 
-    // 0) 可能已经连着了（上一轮扫描连上过、或者用户手动连过）
-    std::wstring known = EndpointFromDeviceList(ip);
-    if (!known.empty()) return known;
-    if (cancel && cancel->load()) return {};
-
-    // 1) mDNS 先问：一次 adb mdns services 只要 20ms，无线调试的端口只能从这里拿到。
-    //    注意它只在 adb server 刚起/handle 变化后短时间有缓存，问不到也正常。
-    RunOptions o;
-    o.timeoutMs = 6000;
-    o.cancel = cancel;
-    auto r = ::adb::DeviceSession::Instance().Run({L"mdns", L"services"}, o);
-    if (r.started) {
-        for (const auto& cand : ParseConnectCandidates(r.OutW())) {
-            size_t colon = cand.rfind(L':');
-            if (colon == std::wstring::npos) continue;
-            if (cand.substr(0, colon) != ip) continue;
-            if (DeviceReady(cand)) return cand;
-        }
-    }
-    if (cancel && cancel->load()) return {};
-
-    // 2) 默认端口（"adb tcpip 5555" 之后的设备都在这儿）
-    if (ProbeTcpPort(ip, 5555, timeoutMs)) return ip + L":5555";
-    if (cancel && cancel->load()) return {};
-
-    // 3) 兜底：扫 Android 无线调试的随机端口段。
-    //    这里用固定的 250ms 连接超时，不跟"局域网时延阈值"混用 ——
-    //    50ms 是判断"这台机器在不在我局域网"的标准，扫端口是点对点的，
-    //    给太短会漏掉真实开放的端口（实测 50ms 时好时坏）。
-    const int portTimeout = 250;
-    std::vector<int> ports = ScanPortRange(ip, 30000, 50000, portTimeout, cancel);
+// 依次吃掉候选端口：每个都 connect 一次，再用 adb devices 复核状态。
+// 只认"复核通过"的端点 —— 端口开着不等于它就是 adb（可能是别的服务）。
+std::wstring TryPorts(const std::wstring& ip, std::vector<int> ports, int timeoutMs,
+                      std::atomic<bool>* cancel) {
     for (int p : ports) {
+        if (p <= 0 || p > 65535) continue;
         if (cancel && cancel->load()) return {};
-        std::wstring endpoint = ip + L":" + std::to_wstring(p);
+        if (!ProbeTcpPort(ip, p, timeoutMs)) continue;
+
+        const std::wstring endpoint = ip + L":" + std::to_wstring(p);
         RunOptions co;
         co.timeoutMs = 6000;
         co.cancel = cancel;
@@ -454,8 +438,57 @@ std::wstring FindAdbEndpoint(const std::wstring& ip, int timeoutMs,
     return {};
 }
 
-ScanResult ScanLan(const std::wstring& prefix, int timeoutMs, int adbPort,
-                   std::atomic<bool>* cancel) {
+}  // namespace
+
+std::wstring FindAdbEndpoint(const std::wstring& ip, const std::vector<int>& knownPorts,
+                             int timeoutMs, bool deepScan, std::atomic<bool>* cancel) {
+    if (ip.empty()) return {};
+
+    // 0) 可能已经连着了（上一轮扫描连上过、或者用户手动连过）
+    std::wstring known = EndpointFromDeviceList(ip);
+    if (!known.empty()) return known;
+    if (cancel && cancel->load()) return {};
+
+    // 1) mDNS：Android 11+「无线调试」的随机端口只有这里能拿到。
+    //    先问 adb 自带缓存，再自己发 DNS-SD 组播查询（前者对没连过的设备恒为空）。
+    std::vector<int> candidates;
+    for (const auto& svc : QueryAdbMdns(1500, cancel)) {
+        if (svc.pairing) continue;                 // 配对端口连不上，跳过
+        if (svc.ip != ip) continue;
+        if (std::find(candidates.begin(), candidates.end(), svc.port) == candidates.end())
+            candidates.push_back(svc.port);
+    }
+    if (cancel && cancel->load()) return {};
+    if (!candidates.empty()) {
+        std::wstring ep = TryPorts(ip, candidates, timeoutMs, cancel);
+        if (!ep.empty()) return ep;
+    }
+    if (cancel && cancel->load()) return {};
+
+    // 2) 扫描阶段实测开着的端口：不猜、不编，连上并用 devices 复核
+    if (!knownPorts.empty()) {
+        std::wstring ep = TryPorts(ip, knownPorts, timeoutMs, cancel);
+        if (!ep.empty()) return ep;
+    }
+    if (cancel && cancel->load()) return {};
+
+    // 3) 深度扫描：只在用户明确要求时才跑（4.5 万个端口，几秒到十几秒）
+    if (deepScan) {
+        // 端口探测超时固定 250ms，不跟"局域网时延阈值"混用 ——
+        // 50ms 是判断"这台机器在不在我局域网"的标准，扫端口是点对点的，
+        // 给太短会漏掉真实开放的端口（实测 50ms 时好时坏）。
+        std::vector<int> ports = ScanPortRange(ip, 20000, 65000, 250, cancel);
+        std::wstring ep = TryPorts(ip, ports, timeoutMs, cancel);
+        if (!ep.empty()) return ep;
+    }
+
+    // 找不到就返回空。**绝不回落到 5555 猜测**：
+    // 猜错端口会让界面显示"已连接"，随后每条命令都超时，比明确失败更难排查。
+    return {};
+}
+
+ScanResult ScanLan(const std::wstring& prefix, int timeoutMs,
+                   const std::vector<int>& ports, std::atomic<bool>* cancel) {
     ScanResult result;
     if (prefix.empty()) return result;
     if (timeoutMs < 1) timeoutMs = 1;
@@ -465,37 +498,69 @@ ScanResult ScanLan(const std::wstring& prefix, int timeoutMs, int adbPort,
 
     // 每台主机的结论：0 = 未知，1 = 在线
     std::vector<char> alive(256, 0);
-    std::vector<char> hasAdb(256, 0);
     std::vector<char> settled(256, 0);   // 已经有结论的，不必再 ICMP
     std::vector<int>  rtt(256, -1);
+    std::vector<std::vector<int>> openPorts(256);   // 每台主机实测开着的 adb 候选端口
 
     in_addr baseAddr{};
     if (::InetPtonW(AF_INET, (prefix + L".0").c_str(), &baseAddr) != 1) return result;
     DWORD baseIp = baseAddr.S_un.S_addr;
 
+    // ---------------------------------------------------------------- 阶段 0
+    // 组装候选端口：默认端口 + mDNS 报出来的端口（随机高位端口只能这么拿到）。
+    // 不查 mDNS 就只能探 5555，Android 11+ 的「无线调试」设备会全部显示"端口未开"。
+    std::vector<int> probePorts = ports.empty() ? DefaultAdbPortCandidates() : ports;
+    for (const auto& svc : QueryAdbMdns(1200, cancel)) {
+        if (svc.port <= 0 || svc.port > 65535) continue;
+        if (std::find(probePorts.begin(), probePorts.end(), svc.port) == probePorts.end())
+            probePorts.push_back(svc.port);
+    }
+    // 去重并限个上限：端口越多，阶段 1 的套接字越多、越慢
+    {
+        std::vector<int> uniq;
+        for (int p : probePorts) {
+            if (p <= 0 || p > 65535) continue;
+            if (std::find(uniq.begin(), uniq.end(), p) == uniq.end()) uniq.push_back(p);
+        }
+        if (uniq.empty()) uniq = DefaultAdbPortCandidates();
+        if (uniq.size() > 16) uniq.resize(16);
+        probePorts.swap(uniq);
+    }
+
+    if (cancel && cancel->load()) {
+        result.elapsedMs = ::GetTickCount64() - t0;
+        return result;
+    }
+
     // ---------------------------------------------------------------- 阶段 1
-    // 批量非阻塞 connect 打 adb 端口：254 个套接字一口气发出去，一个 select 收完。
-    //   Open     → 主机活着，而且开着 adb
+    // 批量非阻塞 connect 打每个候选端口：254×N 个套接字一口气发出去，一个 select 收完。
+    //   Open     → 主机活着，而且这个端口开着
     //   Refused  → 主机活着（回了 RST），只是没开这个端口
     // 时延超过 50ms 的一律不算（跨网段 / 丢包重传，不是同一个局域网）
     {
         std::vector<Target> batch;
-        batch.reserve(254);
-        for (int h = 1; h <= 254; ++h) {
-            DWORD ip = 0;
-            auto* b = reinterpret_cast<uint8_t*>(&baseIp);
-            auto* o = reinterpret_cast<uint8_t*>(&ip);
-            o[0] = b[0]; o[1] = b[1]; o[2] = b[2]; o[3] = static_cast<uint8_t>(h);
-            batch.push_back(Target{ip, adbPort, h});
+        batch.reserve(254 * probePorts.size());
+        for (size_t pi = 0; pi < probePorts.size(); ++pi) {
+            for (int h = 1; h <= 254; ++h) {
+                DWORD ip = 0;
+                auto* b = reinterpret_cast<uint8_t*>(&baseIp);
+                auto* o = reinterpret_cast<uint8_t*>(&ip);
+                o[0] = b[0]; o[1] = b[1]; o[2] = b[2]; o[3] = static_cast<uint8_t>(h);
+                batch.push_back(Target{ip, probePorts[pi], h});
+            }
         }
         std::vector<BatchOut> st = BatchConnect(batch, timeoutMs, cancel);
         for (size_t i = 0; i < st.size(); ++i) {
-            int h = static_cast<int>(i) + 1;
+            const int h = batch[i].tag;
+            if (h < 1 || h > 254) continue;
             if (st[i].rttMs > kLanMaxLatencyMs) continue;
             if (st[i].state == PortState::Open) {
-                alive[h] = 1; hasAdb[h] = 1; settled[h] = 1; rtt[h] = st[i].rttMs;
+                alive[h] = 1; settled[h] = 1;
+                if (rtt[h] < 0) rtt[h] = st[i].rttMs;
+                openPorts[h].push_back(batch[i].port);
             } else if (st[i].state == PortState::Refused) {
-                alive[h] = 1; settled[h] = 1; rtt[h] = st[i].rttMs;
+                alive[h] = 1; settled[h] = 1;
+                if (rtt[h] < 0) rtt[h] = st[i].rttMs;
             }
         }
     }
@@ -571,7 +636,11 @@ ScanResult ScanLan(const std::wstring& prefix, int timeoutMs, int adbPort,
         ScanHost host;
         host.ip = prefix + L"." + std::to_wstring(h);
         host.rttMs = rtt[h];
-        host.adb = hasAdb[h] != 0;
+        std::sort(openPorts[h].begin(), openPorts[h].end());
+        openPorts[h].erase(std::unique(openPorts[h].begin(), openPorts[h].end()),
+                           openPorts[h].end());
+        host.adbPorts = openPorts[h];
+        host.adb = !host.adbPorts.empty();
         result.hosts.push_back(host);
         result.alive.push_back(host.ip);
         if (host.adb) result.adbHosts.push_back(host.ip);

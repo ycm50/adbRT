@@ -88,3 +88,4 @@
 #define IDC_BTN_ACTION5     3053
 #define IDC_SHOT_CANVAS     3051
 #define IDD_SHOT            3052
+#define IDC_CHK_DEEP_SCAN   3054

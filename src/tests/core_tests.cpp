@@ -6,14 +6,13 @@
 #include <string>
 #include <vector>
 
+#include "../core/adb_mdns.h"
 #include "../core/adb_runner.h"
 #include "../core/command_builder.h"
 #include "../core/bounded_text.h"
 #include "../core/core.h"
 #include "../core/parsers.h"
-#include "../core/apk_res.h"
 #include "../core/settings.h"
-#include "fixture_loader.h"
 
 namespace {
 
@@ -76,28 +75,6 @@ int main() {
 
     Check(adb::IsValidPartitionName(L"boot_a"), "分区名合法");
     Check(!adb::IsValidPartitionName(L"boot;rm -rf"), "分区名拒绝注入");
-
-    // ---------------------------------------------------------- APK 应用名称解析
-    {
-        std::vector<uint8_t> manifest;
-        Check(adbtest::LoadFixture(L"fixture.manifest.bin", &manifest), "读取 manifest 样本");
-
-        adb::ManifestLabel ml;
-        Check(adb::ParseManifestLabel(manifest, &ml), "解析 manifest 的 android:label");
-        Check(ml.hasLiteral, "样本里 label 是字符串字面量");
-        CheckEq(ml.literal, L"AdbRT 测试应用", "取到应用名称");
-
-        CheckEq(adb::ResolveAppLabel(manifest, {}), L"AdbRT 测试应用", "两步合一路径");
-
-        // 坏输入必须安全返回，不能崩
-        std::vector<uint8_t> junk = {0, 1, 2, 3, 4, 5, 6, 7};
-        adb::ManifestLabel bad;
-        Check(!adb::ParseManifestLabel(junk, &bad), "垃圾数据解析失败但不崩");
-        std::wstring none;
-        Check(!adb::LookupStringResource(junk, 0x7f010000, &none), "垃圾 arsc 安全失败");
-        Check(adb::ResolveAppLabel({}, {}).empty(), "空输入返回空串");
-        Check(adb::ResolveAppLabel(junk, junk).empty(), "全垃圾输入返回空串");
-    }
 
     // ---------------------------------------------------------- 多值包名展开
     {
@@ -225,6 +202,22 @@ int main() {
         Check(pkgs.size() == 2, "解析 2 个包名");
         if (pkgs.size() == 2) CheckEq(pkgs[0].package, L"com.a", "包名排序");
     }
+
+    // ---------------------------------------------------------- 带路径的包列表
+    {
+        // pm list packages -f 的路径里可能含 '='（如 ~~abc==），
+        // 必须按最后一个 '=' 切分，否则包名会被切断
+        auto withPaths = adb::ParsePackageListWithPaths(
+            L"package:/data/app/~~YNVcDM-f-9CM==/pkg-abc==/base.apk=com.example.a\n"
+            L"package:/product/app/B/B.apk=com.example.b\n");
+        Check(withPaths.size() == 2, "解析出 2 个带路径的包");
+        if (withPaths.size() == 2) {
+            CheckEq(withPaths[0].package, L"com.example.a", "按最后一个 = 切分包名");
+            CheckEq(withPaths[0].apkPath,
+                    L"/data/app/~~YNVcDM-f-9CM==/pkg-abc==/base.apk", "路径完整保留");
+            CheckEq(withPaths[1].package, L"com.example.b", "普通路径解析");
+        }
+    }
     CheckEqStr(std::to_string(adb::ParseProgressPercent(L"[100%] /sdcard/a")), "100", "进度 100%");
     Check(adb::ParseProgressPercent(L"nothing") == -1, "无进度返回 -1");
 
@@ -284,6 +277,89 @@ int main() {
         adb::BuildError err;
         Check(!adb::BuildCommand(bad, &out, &err), "缺少 APK 参数时构造失败");
         Check(!err.message.empty(), "失败时给出中文原因");
+    }
+
+    // ---------------------------------------------------------- mDNS（随机端口的唯一来源）
+    {
+        // 手工拼一条 mDNS 应答：PTR(_adb-tls-connect → 实例) + SRV(端口) + A(IP)
+        auto name = [](std::vector<uint8_t>& v, const char* s) {
+            const char* p = s;
+            while (*p) {
+                const char* dot = p;
+                while (*dot && *dot != '.') ++dot;
+                v.push_back(static_cast<uint8_t>(dot - p));
+                v.insert(v.end(), p, dot);
+                if (!*dot) break;
+                p = dot + 1;
+            }
+            v.push_back(0);
+        };
+        auto u16 = [](std::vector<uint8_t>& v, uint16_t x) {
+            v.push_back(static_cast<uint8_t>(x >> 8));
+            v.push_back(static_cast<uint8_t>(x & 0xFF));
+        };
+        std::vector<uint8_t> pkt;
+        auto rr = [&](const char* owner, uint16_t type, const std::vector<uint8_t>& rdata) {
+            name(pkt, owner);
+            u16(pkt, type);
+            u16(pkt, 0x8001);                     // class IN + cache-flush
+            // TTL 是 4 字节：只写 2 字节会把后面的 rdlength 整体错位
+            u16(pkt, 0); u16(pkt, 120);
+            u16(pkt, static_cast<uint16_t>(rdata.size()));
+            pkt.insert(pkt.end(), rdata.begin(), rdata.end());
+        };
+
+        u16(pkt, 0); u16(pkt, 0x8400);            // ID + response
+        u16(pkt, 0); u16(pkt, 3);                 // QD=0, AN=3
+        u16(pkt, 0); u16(pkt, 0);
+
+        std::vector<uint8_t> ptrData;
+        name(ptrData, "adb-1a2b3c-XyZ._adb-tls-connect._tcp.local");
+        rr("_adb-tls-connect._tcp.local", 12, ptrData);
+
+        std::vector<uint8_t> srvData;
+        u16(srvData, 0); u16(srvData, 0); u16(srvData, 37221);     // prio/weight/port
+        name(srvData, "Android.local");
+        rr("adb-1a2b3c-XyZ._adb-tls-connect._tcp.local", 33, srvData);
+
+        std::vector<uint8_t> aData = {192, 168, 1, 7};
+        rr("Android.local", 1, aData);
+
+        adb::MdnsDnsRecords rec;
+        Check(adb::ParseMdnsPacket(pkt.data(), pkt.size(), &rec), "mDNS 报文解析成功");
+        Check(rec.ptr.size() == 1 && rec.srv.size() == 1 && rec.a.size() == 1,
+              "PTR / SRV / A 三条记录都拿到");
+
+        auto svcs = adb::AssembleMdnsServices({rec});
+        Check(svcs.size() == 1, "串表得到 1 个服务");
+        if (svcs.size() == 1) {
+            CheckEq(svcs[0].ip, L"192.168.1.7", "mDNS 服务拿到真实 IP");
+            Check(svcs[0].port == 37221, "mDNS 服务拿到随机端口（不是 5555）");
+            Check(!svcs[0].pairing, "connect 服务不算配对服务");
+        }
+
+        // 截断 / 空的报文不能崩，也不能返回半截数据
+        adb::MdnsDnsRecords bad;
+        Check(!adb::ParseMdnsPacket(pkt.data(), 8, &bad), "过短报文安全拒绝");
+        Check(!adb::ParseMdnsPacket(nullptr, 0, &bad), "空指针安全拒绝");
+        std::vector<uint8_t> truncated(pkt.begin(), pkt.begin() + 20);
+        adb::MdnsDnsRecords bad2;
+        adb::ParseMdnsPacket(truncated.data(), truncated.size(), &bad2);   // 不要求成功，但不能崩
+
+        // adb mdns services 的文本形态
+        auto text = adb::ParseMdnsAdbServices(
+            L"adb-1a2b3c-XyZ\t_adb-tls-connect._tcp.\t192.168.1.7:37221\r\n"
+            L"adb-9z8y-ABC\t_adb-tls-pairing._tcp.\t192.168.1.8:41001\r\n");
+        Check(text.size() == 2, "adb mdns services 解析出两条");
+        if (text.size() == 2) {
+            Check(text[0].port == 37221, "第一条端口正确");
+            Check(!text[0].pairing, "第一条是 connect 服务");
+            Check(text[1].pairing, "第二条是 pairing 服务");
+        }
+        // 空表（实测 adb 36.0.2 对没连过的设备恒为空）不能凭空造出 5555
+        Check(adb::ParseMdnsAdbServices(L"List of discovered mdns services\r\n").empty(),
+              "空 mDNS 表不产生任何设备（更不会编一个 5555）");
+        Check(adb::ParseMdnsAdbServices(L"").empty(), "空输入不产生设备");
     }
 
     // ---------------------------------------------------------- 有界文本缓冲

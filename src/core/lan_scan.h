@@ -38,10 +38,16 @@ enum class PortState {
 PortState ProbeTcpPortEx(const std::wstring& ip, int port, int timeoutMs);
 bool      ProbeTcpPort(const std::wstring& ip, int port, int timeoutMs);
 
+// 扫描时要探的 adb 端口候选。
+//   5555 只是 "adb tcpip 5555" 的老式无线调试；Android 11+ 的「无线调试」
+//   端口是随机的高位端口，只能靠 mDNS 报出来 —— 所以这里必须能带自定义端口。
+std::vector<int> DefaultAdbPortCandidates();
+
 struct ScanHost {
     std::wstring ip;
-    int  rttMs = -1;      // 实测时延；-1 表示不是 ICMP 测出来的（TCP/ARP 证明）
-    bool adb = false;     // adb 端口（默认 5555）开着
+    int  rttMs = -1;            // 实测时延；-1 表示不是 ICMP 测出来的（TCP/ARP 证明）
+    bool adb = false;           // 是否探到了开着的 adb 端口
+    std::vector<int> adbPorts;  // 实测开着的端口（按端口号升序），端口号是设备真实端口
 };
 
 struct ScanResult {
@@ -54,29 +60,30 @@ struct ScanResult {
 };
 
 // 并发扫一个 /24 段（prefix 形如 "192.168.1"）。三阶段，全程并发：
-//   ① 批量非阻塞 connect 打 adb 端口 —— 一次发 254 个，一个 select 收完
+//   ① 批量非阻塞 connect 打每个候选端口 —— 254×N 个套接字一口气发出去，一个 select 收完
 //   ② 本机 ARP 邻居表 —— 已经在表里的地址必然是活的，零成本
 //   ③ 剩下的补 ICMP echo —— 多线程并发，单次超时就是 50ms 上限
 // 时延超过 kLanMaxLatencyMs 的响应不算"在同一局域网"，直接丢弃。
+// ports 为空时用 DefaultAdbPortCandidates()。
 ScanResult ScanLan(const std::wstring& prefix, int timeoutMs = kLanMaxLatencyMs,
-                   int adbPort = 5555, std::atomic<bool>* cancel = nullptr);
+                   const std::vector<int>& ports = {}, std::atomic<bool>* cancel = nullptr);
 
 // 在 [lo, hi) 里找开着的端口。
-// 用非阻塞 connect + 批量 select（一次最多 512 个），不开线程 ——
-// 扫 2 万个端口也就几十批，比"一个端口一个线程"省得多。
+// 用非阻塞 connect + 批量 select（一次最多 2048 个），不开线程 ——
+// 扫 4 万个端口也就几十批，比"一个端口一个线程"省得多。
 std::vector<int> ScanPortRange(const std::wstring& ip, int lo, int hi,
                                int timeoutMs = 250,
                                std::atomic<bool>* cancel = nullptr);
 
-// 选中一台主机后，找出它的 adb 端口：
-//   1) 先试默认的 5555
-//   2) 再问 adb mdns services（无线调试配对后端口是随机的，只有 mDNS 知道）
-//   3) 都没有就扫 30000-50000 这段，对每个开着的端口真的 adb connect 一次
-//   0) 先看 adb devices 里是不是已经连着了
-//   1) 再试默认的 5555
-//   2) 再问 adb mdns services（无线调试配对后端口是随机的，只有 mDNS 知道）
-//   3) 都没有就扫 30000-50000 这段，每个开着的端口真的 adb connect 一次并用 devices 复核
-std::wstring FindAdbEndpoint(const std::wstring& ip, int timeoutMs = kLanMaxLatencyMs,
+// 选中一台主机后，找出它真正可用的 adb 端点，四级：
+//   0) adb devices 里已经连着 → 直接用那个序列号
+//   1) mDNS（adb 自带缓存 + 自己发 DNS-SD 查询）报出来的端口
+//   2) knownPorts（扫描阶段实测开着的端口）逐个 connect 并用 adb devices 复核
+//   3) 只有 deepScan=true 时才扫 20000-65000 全端口段
+// 注意：**不再默认猜 5555**。找不到就返回空，由界面提示用户重新打开无线调试
+// 或手填端口 —— 猜一个错端口只会让用户以为"连上了"然后所有命令都超时。
+std::wstring FindAdbEndpoint(const std::wstring& ip, const std::vector<int>& knownPorts,
+                             int timeoutMs = kLanMaxLatencyMs, bool deepScan = false,
                              std::atomic<bool>* cancel = nullptr);
 
 }  // namespace adb

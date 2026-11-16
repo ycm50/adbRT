@@ -92,6 +92,33 @@ std::vector<PackageEntry> ParsePackageList(const std::wstring& output) {
     return out;
 }
 
+std::vector<PackageEntry> ParsePackageListWithPaths(const std::wstring& output) {
+    std::vector<PackageEntry> out;
+    for (const auto& rawLine : SplitLines(output)) {
+        std::wstring line = Trim(rawLine);
+        if (!StartsWith(line, L"package:")) continue;
+        std::wstring rest = line.substr(8);
+
+        // 形如 "package:/data/app/~~x==/foo/base.apk=com.example"
+        // 按最后一个 '=' 切：路径里确实可能出现 '='
+        size_t eq = rest.rfind(L'=');
+        PackageEntry e;
+        if (eq == std::wstring::npos) {
+            e.package = rest;
+        } else {
+            e.apkPath = rest.substr(0, eq);
+            e.package = rest.substr(eq + 1);
+        }
+        if (e.package.empty()) continue;
+        out.push_back(std::move(e));
+    }
+    std::sort(out.begin(), out.end(),
+              [](const PackageEntry& a, const PackageEntry& b) {
+                  return a.package < b.package;
+              });
+    return out;
+}
+
 const std::vector<KeyEvent>& StandardKeyEvents() {
     static const std::vector<KeyEvent> k = {
         {L"BACK(\x8fd4\x56de)", 4},

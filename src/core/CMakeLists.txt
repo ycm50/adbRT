@@ -8,10 +8,8 @@ add_library(adbrt_core STATIC
   bounded_text.cpp
   device.cpp
   settings.cpp
-  apk_res.cpp
-  label_cache.cpp
-  inflate.cpp
   lan_scan.cpp
+  adb_mdns.cpp
 )
 
 target_include_directories(adbrt_core PUBLIC

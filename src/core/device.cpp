@@ -128,6 +128,38 @@ std::vector<PackageEntry> DeviceSession::InstalledPackages(bool includeSystem) {
     return out;
 }
 
+std::vector<PackageEntry> DeviceSession::InstalledPackagesWithPaths(bool includeSystem) {
+    RunOptions o;
+    o.timeoutMs = 30000;
+    auto r = RunProcess(AdbExe(), WithSerial({L"shell", L"pm", L"list", L"packages", L"-f"}), o);
+    if (!r.started) return {};
+
+    std::vector<PackageEntry> out = ParsePackageListWithPaths(r.OutW());
+    if (!includeSystem) {
+        // 再问一次 -3 标记哪些是第三方（-f 和 -3 组合不可靠）
+        auto t = RunProcess(AdbExe(),
+                            WithSerial({L"shell", L"pm", L"list", L"packages", L"-3"}), o);
+        std::unordered_set<std::wstring> third;
+        for (const auto& p : ParsePackageList(t.OutW())) third.insert(p.package);
+        std::vector<PackageEntry> kept;
+        kept.reserve(out.size());
+        for (auto& p : out) {
+            bool isSystem = third.find(p.package) == third.end();
+            if (isSystem) continue;
+            p.system = false;
+            kept.push_back(std::move(p));
+        }
+        return kept;
+    }
+    // 全量时也要标出系统应用
+    auto t = RunProcess(AdbExe(),
+                        WithSerial({L"shell", L"pm", L"list", L"packages", L"-3"}), o);
+    std::unordered_set<std::wstring> third;
+    for (const auto& p : ParsePackageList(t.OutW())) third.insert(p.package);
+    for (auto& p : out) p.system = third.find(p.package) == third.end();
+    return out;
+}
+
 std::vector<std::wstring> DeviceSession::Partitions() {
     RunOptions o;
     o.timeoutMs = 15000;

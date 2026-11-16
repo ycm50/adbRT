@@ -12,9 +12,11 @@
 #include <gdiplus.h>
 
 #include <algorithm>
+#include <map>
 #include <string>
 #include <vector>
 
+#include "../core/adb_mdns.h"
 #include "../core/adb_runner.h"
 #include "../core/command_builder.h"
 #include "../core/device.h"
@@ -1028,6 +1030,7 @@ namespace {
 // ------------------------------------------------------------- 局域网扫描
 constexpr UINT WM_LAN_SCAN_DONE = WM_APP + 91;
 constexpr UINT WM_LAN_RESOLVED  = WM_APP + 92;
+constexpr UINT WM_LAN_MDNS      = WM_APP + 93;   // mDNS 发现结果（扫之前就可能有）
 
 // 后台线程只认这个句柄组：它比窗口活得久，窗口没了也不会用悬垂指针。
 // （线程和窗口谁先结束不确定，共享状态用 shared_ptr，取消用原子标志。）
@@ -1035,18 +1038,29 @@ struct LanShared {
     std::atomic<bool> cancel{false};
 };
 
+// 列表里的一行：显示文本 + 这一行代表的地址（可能是 "IP" 或 "IP:端口"）
+struct LanRow {
+    std::wstring text;
+    std::wstring value;
+};
+
 struct LanCtx : PickerBase {
     std::vector<adb::LocalNet> nets;
-    std::vector<std::wstring>  rows;       // 显示行："IP   说明"
-    std::vector<std::wstring>  values;     // 行 → IP
+    std::vector<LanRow> mdnsRows;          // mDNS 直接发现的设备（不用扫全网段）
+    std::vector<LanRow> hostRows;          // 局域网扫描结果
+    std::vector<std::wstring> values;      // 行 → 地址
+    // 主机 → 扫描阶段实测开着的端口。
+    // 有了它，选中主机时就不用再猜 5555，也不用重扫一遍端口段。
+    std::map<std::wstring, std::vector<int>> knownPorts;
     std::wstring* out = nullptr;
     HWND combo = nullptr;
     HWND list = nullptr;
     HWND scanBtn = nullptr;
+    HWND deepChk = nullptr;                // 深度扫描（全端口段）开关，默认关
     HWND status = nullptr;
     HWND manual = nullptr;
     std::shared_ptr<LanShared> shared;
-    std::string  lastNote;                 // 上一次扫描的耗时 / 线程数，界面上显示
+    std::string  lastNote;
 };
 
 struct LanScanArg {
@@ -1055,30 +1069,45 @@ struct LanScanArg {
     std::shared_ptr<LanShared> shared;
 };
 
+struct MdnsArg {
+    HWND hwnd = nullptr;
+    std::shared_ptr<LanShared> shared;
+};
+
 struct ResolveArg {
     HWND hwnd = nullptr;
     std::wstring host;
+    std::vector<int> knownPorts;
+    bool deepScan = false;
     std::shared_ptr<LanShared> shared;
 };
+
+std::wstring PortsText(const std::vector<int>& ports) {
+    if (ports.empty()) return L"未探到";
+    std::wstring s;
+    for (size_t i = 0; i < ports.size(); ++i) {
+        if (i) s += L"/";
+        s += std::to_wstring(ports[i]);
+    }
+    return s;
+}
 
 void LanFill(LanCtx* ctx) {
     ::SendMessageW(ctx->list, LB_RESETCONTENT, 0, 0);
     ctx->values.clear();
-    for (const auto& line : ctx->rows) {
-        ::SendMessageW(ctx->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(line.c_str()));
-        // 行首故意留一格空白（列表看着不贴边），取 IP 时先跳过它
-        size_t b = line.find_first_not_of(L' ');
-        if (b == std::wstring::npos) { ctx->values.push_back(line); continue; }
-        size_t e = line.find(L' ', b);
-        ctx->values.push_back(e == std::wstring::npos ? line.substr(b) : line.substr(b, e - b));
-    }
+    auto put = [&](const LanRow& r) {
+        ::SendMessageW(ctx->list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(r.text.c_str()));
+        ctx->values.push_back(r.value);
+    };
+    for (const auto& r : ctx->mdnsRows) put(r);
+    for (const auto& r : ctx->hostRows) put(r);
 }
 
 // 后台线程：扫完把结果一次性发回 UI（窗口没了就自己释放内存）
 DWORD WINAPI LanScanProc(LPVOID param) {
     auto* arg = static_cast<LanScanArg*>(param);
     auto* result = new adb::ScanResult();
-    *result = adb::ScanLan(arg->prefix, adb::kLanMaxLatencyMs, 5555,
+    *result = adb::ScanLan(arg->prefix, adb::kLanMaxLatencyMs, {},
                            arg->shared ? &arg->shared->cancel : nullptr);
     if (!::PostMessageW(arg->hwnd, WM_LAN_SCAN_DONE, 0, reinterpret_cast<LPARAM>(result)))
         delete result;
@@ -1086,22 +1115,61 @@ DWORD WINAPI LanScanProc(LPVOID param) {
     return 0;
 }
 
-// 后台线程：给选中的主机找 adb 端口（可能要扫端口段）
+// 后台线程：问一次 mDNS（adb 自带缓存 + 自己发的 DNS-SD 查询）
+DWORD WINAPI LanMdnsProc(LPVOID param) {
+    auto* arg = static_cast<MdnsArg*>(param);
+    auto* services = new std::vector<adb::MdnsAdbService>(
+        adb::QueryAdbMdns(1500, arg->shared ? &arg->shared->cancel : nullptr));
+    if (!::PostMessageW(arg->hwnd, WM_LAN_MDNS, 0, reinterpret_cast<LPARAM>(services)))
+        delete services;
+    delete arg;
+    return 0;
+}
+
+// 后台线程：给选中的主机找 adb 端口（mDNS 的端口 + 扫描实测的端口 + 可选深度扫描）
 DWORD WINAPI ResolveProc(LPVOID param) {
     auto* arg = static_cast<ResolveArg*>(param);
     std::wstring endpoint;
     if (arg->host.find(L':') != std::wstring::npos) {
-        endpoint = arg->host;                     // 已经带端口
+        endpoint = arg->host;                     // 已经带端口（mDNS 行 / 扫描行都是）
     } else {
-        std::wstring ep = adb::FindAdbEndpoint(arg->host, adb::kLanMaxLatencyMs,
-                                               arg->shared ? &arg->shared->cancel : nullptr);
-        endpoint = ep.empty() ? (arg->host + L":5555") : ep;
+        // 找不到就返回空 —— **这里绝不回落到 "IP:5555"**。
+        // 猜一个错端口会让界面显示"已连接"，之后每条命令都超时，
+        // 比明确告诉用户"没找到端口"难排查得多。
+        endpoint = adb::FindAdbEndpoint(arg->host, arg->knownPorts, adb::kLanMaxLatencyMs,
+                                        arg->deepScan,
+                                        arg->shared ? &arg->shared->cancel : nullptr);
     }
     auto* heap = new std::wstring(endpoint);
     if (!::PostMessageW(arg->hwnd, WM_LAN_RESOLVED, 0, reinterpret_cast<LPARAM>(heap)))
         delete heap;
     delete arg;
     return 0;
+}
+
+// 起一个后台线程；句柄立刻关掉，线程结束时系统自己回收
+bool StartThread(LPTHREAD_START_ROUTINE proc, void* arg);
+
+// 起线程给某台主机找 adb 端口（双击 / 点确定都走这里）
+void StartResolve(LanCtx* ctx, HWND hwnd, const std::wstring& picked) {
+    auto* arg = new ResolveArg();
+    arg->hwnd = hwnd;
+    arg->host = picked;
+    arg->shared = ctx->shared;
+    auto it = ctx->knownPorts.find(picked);
+    if (it != ctx->knownPorts.end()) arg->knownPorts = it->second;
+    arg->deepScan = ctx->deepChk &&
+                    ::SendMessageW(ctx->deepChk, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    ::EnableWindow(ctx->scanBtn, FALSE);
+    ::SetWindowTextW(ctx->scanBtn, L"查找中…");
+    SetTextOf(ctx->status, arg->deepScan
+        ? L"正在深度扫描端口段（20000-65000），可能要十几秒…"
+        : L"正在查找这台设备的 adb 端口…");
+    if (!StartThread(ResolveProc, arg)) {
+        delete arg;
+        ::EnableWindow(ctx->scanBtn, TRUE);
+        ::SetWindowTextW(ctx->scanBtn, L"开始扫描");
+    }
 }
 
 // 起一个后台线程；句柄立刻关掉，线程结束时系统自己回收
@@ -1139,13 +1207,17 @@ LRESULT CALLBACK LanProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ctx->status = ::CreateWindowExW(0, L"STATIC", L"选一个网段，然后点「开始扫描」。",
                 WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0, hwnd,
                 reinterpret_cast<HMENU>(IDC_STATUSBAR), nullptr, nullptr);
+            // 深度扫描默认关：全端口段 4.5 万个端口，要十几秒，不能默认拖慢每次选设备
+            ctx->deepChk = ::CreateWindowExW(0, L"BUTTON", L"深度扫描端口段（慢）",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd,
+                reinterpret_cast<HMENU>(IDC_CHK_DEEP_SCAN), nullptr, nullptr);
             HWND ok = ::CreateWindowExW(0, L"BUTTON", L"确定",
                 WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 0, 0, 0, 0, hwnd,
                 reinterpret_cast<HMENU>(IDOK), nullptr, nullptr);
             HWND cancel = ::CreateWindowExW(0, L"BUTTON", L"取消",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd,
                 reinterpret_cast<HMENU>(IDCANCEL), nullptr, nullptr);
-            for (HWND c : {ctx->scanBtn, ok, cancel, ctx->status, ctx->manual})
+            for (HWND c : {ctx->scanBtn, ok, cancel, ctx->status, ctx->manual, ctx->deepChk})
                 ApplyFont(c, g_app.font);
             ApplyFont(ctx->list, g_app.fontMono);
 
@@ -1161,17 +1233,69 @@ LRESULT CALLBACK LanProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             ::SendMessageW(ctx->combo, CB_SETCURSEL, 0, 0);
             ::SetWindowTextW(hwnd, L"扫描局域网设备");
+
+            // 一进来就先问一次 mDNS：Android 11+ 的无线调试端口只有它知道，
+            // 扫全网段是找不到随机端口的。查到就直接列出来，用户点一下就能连。
+            SetTextOf(ctx->status, L"正在通过 mDNS 查找已开启无线调试的设备…");
+            auto* marg = new MdnsArg();
+            marg->hwnd = hwnd;
+            marg->shared = ctx->shared;
+            if (!StartThread(LanMdnsProc, marg)) delete marg;
+            return 0;
+        }
+        case WM_LAN_MDNS: {
+            auto* services = reinterpret_cast<std::vector<adb::MdnsAdbService>*>(lp);
+            if (services) {
+                ctx->mdnsRows.clear();
+                for (const auto& s : *services) {
+                    // mDNS 报出来的每一条都是「IP:端口」，可靠度远高于端口段猜测
+                    std::wstring text = L" " + s.ip + L":" + std::to_wstring(s.port);
+                    text += s.pairing ? L"    配对中（先点「配对无线调试」）"
+                                      : L"    mDNS 发现，可直连";
+                    ctx->mdnsRows.push_back({text, s.ip + L":" + std::to_wstring(s.port)});
+                }
+                const size_t n = ctx->mdnsRows.size();
+                delete services;
+                if (ctx->hostRows.empty()) {
+                    SetTextOf(ctx->status, n
+                        ? adb::Format(L"mDNS 发现 %zu 台设备（列表里带端口的那几行）。"
+                                      L"没看到你的手机，就点「开始扫描」。", n)
+                        : std::wstring(L"mDNS 没发现正在广播的设备。Android 11+ 的端口是随机的，"
+                                       L"请在手机上打开「无线调试」，或者直接点「开始扫描」。"));
+                }
+            }
+            LanFill(ctx);
             return 0;
         }
         case WM_LAN_RESOLVED: {
             auto* endpoint = reinterpret_cast<std::wstring*>(lp);
             ::EnableWindow(ctx->scanBtn, TRUE);
-            if (endpoint) {
-                if (ctx->out) *ctx->out = *endpoint;
-                delete endpoint;
+            std::wstring found;
+            if (endpoint) { found = *endpoint; delete endpoint; }
+            if (!found.empty()) {
+                if (ctx->out) *ctx->out = found;
                 ctx->accepted = true;
                 ::DestroyWindow(hwnd);
+                return 0;
             }
+            // 没找到端口：**不关窗口、不编端口**。
+            // 以前的实现会在这里回落到 "IP:5555"，于是界面上显示连接成功、
+            // 之后每条命令都超时 —— 那正是"无线设备总是被扫成 5555"的来源。
+            ::SetWindowTextW(ctx->scanBtn, L"开始扫描");
+            int sel = static_cast<int>(::SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
+            std::wstring host = (sel >= 0 && sel < static_cast<int>(ctx->values.size()))
+                                    ? ctx->values[static_cast<size_t>(sel)]
+                                    : std::wstring();
+            SetTextOf(ctx->status, L"没找到这台设备的 adb 端口（不会乱猜 5555）。");
+            ::MessageBoxW(hwnd,
+                          L"没找到这台设备的 adb 端口。\r\n\r\n"
+                          L"Android 11+ 的「无线调试」端口是随机的，而且每次重新打开都会变：\r\n"
+                          L"  1) 在手机上重新打开「开发者选项 → 无线调试」，\r\n"
+                          L"  2) 回到这里重开扫描窗口（mDNS 会自动列出带端口的设备），\r\n"
+                          L"  3) 还是没有，勾上「深度扫描端口段（慢）」再点确定，\r\n"
+                          L"  4) 或者按手机屏幕上显示的 IP:端口 手填。",
+                          L"AdbRT", MB_OK | MB_ICONINFORMATION);
+            (void)host;
             return 0;
         }
         case WM_LAN_SCAN_DONE: {
@@ -1179,18 +1303,27 @@ LRESULT CALLBACK LanProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ::EnableWindow(ctx->scanBtn, TRUE);
             ::SetWindowTextW(ctx->scanBtn, L"开始扫描");
             if (result) {
-                ctx->rows.clear();
+                ctx->hostRows.clear();
+                ctx->knownPorts.clear();
                 for (const auto& h : result->hosts) {
-                    std::wstring rtt = h.rttMs >= 0
+                    // 有实测端口就直接给 "IP:端口"，选中/双击都不用再猜；
+                    // 没探到端口就只给 IP，让 FindAdbEndpoint 走 mDNS / 深度扫描。
+                    const std::wstring rtt = h.rttMs >= 0
                         ? adb::Format(L"%d ms", h.rttMs) : std::wstring(L"—");
-                    std::wstring tail = h.adb ? L"adb 端口已开"
-                                              : L"选中后自动找 adb 端口";
-                    // 行首留一格空白，LanFill 取 IP 时按空格切第一段
-                    ctx->rows.push_back(L" " + h.ip + L"    " + rtt + L"    " + tail);
+                    const std::wstring tail = h.adb
+                        ? L"adb 端口 " + PortsText(h.adbPorts)
+                        : L"选中后自动找 adb 端口";
+                    const std::wstring value = h.adb && !h.adbPorts.empty()
+                        ? (h.ip + L":" + std::to_wstring(h.adbPorts.front()))
+                        : h.ip;
+                    // 行首留一格空白，列表看着不贴边
+                    ctx->hostRows.push_back({L" " + h.ip + L"    " + rtt + L"    " + tail, value});
+                    ctx->knownPorts[h.ip] = h.adbPorts;
                 }
                 SetTextOf(ctx->status,
-                          adb::Format(L"在线 %zu 台，其中 %zu 台开着 adb 端口；"
-                                      L"扫描 %d 个地址用了 %llu ms（%d 个线程）。",
+                          adb::Format(L"在线 %zu 台，其中 %zu 台探到了 adb 端口；"
+                                      L"扫描 %d 个地址用了 %llu ms（%d 个线程）。"
+                                      L"没探到端口的设备，双击时会再走 mDNS。",
                                       result->alive.size(), result->adbHosts.size(),
                                       result->probed,
                                       static_cast<unsigned long long>(result->elapsedMs),
@@ -1205,9 +1338,10 @@ LRESULT CALLBACK LanProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ::MoveWindow(ctx->combo, 8, 8, w - 8 - 128, 240, TRUE);
             ::MoveWindow(ctx->scanBtn, w - 124, 8, 116, 24, TRUE);
             ::MoveWindow(ctx->manual, 8, 38, w - 16, 24, TRUE);
-            int listH = h - 70 - 34 - 30;
-            ::MoveWindow(ctx->list, 8, 70, w - 16, listH > 40 ? listH : 40, TRUE);
-            ::MoveWindow(ctx->status, 8, h - 62, w - 16, 20, TRUE);
+            ::MoveWindow(ctx->deepChk, 8, 68, 200, 20, TRUE);
+            int listH = h - 94 - 34 - 30;
+            ::MoveWindow(ctx->list, 8, 94, w - 16, listH > 40 ? listH : 40, TRUE);
+            ::MoveWindow(ctx->status, 8, h - 62, w - 16, 38, TRUE);
             ::MoveWindow(::GetDlgItem(hwnd, IDOK), w - 194, h - 30, 90, 24, TRUE);
             ::MoveWindow(::GetDlgItem(hwnd, IDCANCEL), w - 98, h - 30, 90, 24, TRUE);
             return 0;
@@ -1223,7 +1357,8 @@ LRESULT CALLBACK LanProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 int sel = static_cast<int>(::SendMessageW(ctx->combo, CB_GETCURSEL, 0, 0));
                 if (sel < 0 || sel >= static_cast<int>(ctx->nets.size())) sel = 0;
 
-                ctx->rows.clear();
+                ctx->hostRows.clear();
+                ctx->knownPorts.clear();
                 LanFill(ctx);
                 ::EnableWindow(ctx->scanBtn, FALSE);
                 ::SetWindowTextW(ctx->scanBtn, L"扫描中…"
@@ -1247,16 +1382,7 @@ LRESULT CALLBACK LanProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (id == IDC_LIST_MAIN && code == LBN_DBLCLK) {
                 int sel = static_cast<int>(::SendMessageW(ctx->list, LB_GETCURSEL, 0, 0));
                 if (sel < 0 || sel >= static_cast<int>(ctx->values.size())) return 0;
-                auto* arg = new ResolveArg();
-                arg->hwnd = hwnd;
-                arg->host = ctx->values[static_cast<size_t>(sel)];
-                arg->shared = ctx->shared;
-                ::EnableWindow(ctx->scanBtn, FALSE);
-                SetTextOf(ctx->status, L"正在查找这台设备的 adb 端口…");
-                if (!StartThread(ResolveProc, arg)) {
-                    delete arg;
-                    ::EnableWindow(ctx->scanBtn, TRUE);
-                }
+                StartResolve(ctx, hwnd, ctx->values[static_cast<size_t>(sel)]);
                 return 0;
             }
             if (id == IDOK) {
@@ -1271,16 +1397,7 @@ LRESULT CALLBACK LanProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                   MB_OK | MB_ICONINFORMATION);
                     return 0;
                 }
-                auto* arg = new ResolveArg();
-                arg->hwnd = hwnd;
-                arg->host = picked;
-                arg->shared = ctx->shared;
-                ::EnableWindow(ctx->scanBtn, FALSE);
-                SetTextOf(ctx->status, L"正在查找这台设备的 adb 端口…");
-                if (!StartThread(ResolveProc, arg)) {
-                    delete arg;
-                    ::EnableWindow(ctx->scanBtn, TRUE);
-                }
+                StartResolve(ctx, hwnd, picked);
                 return 0;
             }
             if (id == IDCANCEL) { ::DestroyWindow(hwnd); return 0; }

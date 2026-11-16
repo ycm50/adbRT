@@ -63,13 +63,16 @@ struct PanelState {
 
     HWND combo = nullptr, edit = nullptr, chkFolder = nullptr;
     HWND btnFiles = nullptr, btnPick = nullptr, btnExtra = nullptr;
-    HWND summary = nullptr;
 };
 
 std::vector<CtrlRef> g_params;
 std::vector<CtrlRef> g_flags;
 std::vector<Item>    g_items;
 PanelState           g_panel;
+// 两条参数的"回填目标"输入框：[0]=第一条参数，[1]=第二条参数（flash 的镜像这类）
+HWND                 g_paramEdit[2] = {nullptr, nullptr};
+// 「本机文件」那行的只读汇总框（选择文件 / 整个文件夹 / 勾选文件 都写它）
+HWND                 g_filesSummary = nullptr;
 WNDPROC              g_oldParamProc = nullptr;
 int                  g_panelHeightDesign = 0;
 
@@ -245,7 +248,14 @@ std::vector<std::wstring> DeviceFolders() {
 }
 // ------------------------------------------------------------ 各类控件的生成
 // 每个 block 负责一行（或多行）控件，返回下一个可用的 y（设计坐标）
-int BuildParamBlock(HWND host, const adb::CommandSpec* spec, bool second, int y) {
+//
+// 回填规则（上一版这里是按控件 id 直接找 EDIT 的，重写参数面板时改成了
+// "多个分支共用一个 g_panel.summary"，但 default 分支根本没给它赋值，
+// 于是「浏览…」选完文件后 setEdit 打到 nullptr 上，值被静默丢弃 ——
+// 表现为"选了安装包却什么都没填进来"。现在 editHwnd 直接在创建控件的地方
+// 带出去，不再依赖任何跨分支的共享句柄。）
+int BuildParamBlock(HWND host, const adb::CommandSpec* spec, bool second, int y,
+                    HWND* editHwnd) {
     const int left = 8;
     const int width = 540;
     const adb::ParamKind kind = second ? spec->param2 : spec->param;
@@ -296,6 +306,7 @@ int BuildParamBlock(HWND host, const adb::CommandSpec* spec, bool second, int y)
 
             HWND rel = MakeEdit(host, left + 226, y - 1, width - 226, editId, false);
             g_panel.edit = rel;
+            if (editHwnd) *editHwnd = rel;
             ::SendMessageW(rel, EM_SETCUEBANNER, TRUE,
                            reinterpret_cast<LPARAM>(kind == adb::ParamKind::RemoteDyn
                                ? L"相对文件名（可留空 = 整个目录）"
@@ -310,7 +321,8 @@ int BuildParamBlock(HWND host, const adb::CommandSpec* spec, bool second, int y)
             HWND summary = MakeEdit(host, left, y, width, editId, true);
             ::SendMessageW(summary, EM_SETCUEBANNER, TRUE,
                            reinterpret_cast<LPARAM>(L"还没选文件 / 文件夹"));
-            g_panel.summary = summary;
+            if (editHwnd) *editHwnd = summary;
+            g_filesSummary = summary;
             g_params.push_back({summary, key, kind, adb::FlagKind::Value});
             y += 28;
 
@@ -326,7 +338,7 @@ int BuildParamBlock(HWND host, const adb::CommandSpec* spec, bool second, int y)
             HWND summary = MakeEdit(host, left, y, width - 96, editId, true);
             ::SendMessageW(summary, EM_SETCUEBANNER, TRUE,
                            reinterpret_cast<LPARAM>(L"还没选择属性"));
-            g_panel.summary = summary;
+            if (editHwnd) *editHwnd = summary;
             g_panel.btnExtra = MakeButton(host, L"选择属性…", left + width - 92, y, 92, IDC_BTN_ACTION1);
             g_params.push_back({summary, key, kind, adb::FlagKind::Value});
             MakeLabel(host, L"勾选多个属性会依次读取（每条一个 getprop）", left, y + 26, width);
@@ -337,7 +349,7 @@ int BuildParamBlock(HWND host, const adb::CommandSpec* spec, bool second, int y)
             HWND edit = MakeEdit(host, left, y, width - 96, editId, true);
             ::SendMessageW(edit, EM_SETCUEBANNER, TRUE,
                            reinterpret_cast<LPARAM>(L"还没编辑命令"));
-            g_panel.summary = edit;
+            if (editHwnd) *editHwnd = edit;
             g_panel.btnExtra = MakeButton(host, L"编辑命令…", left + width - 92, y, 92, IDC_BTN_ACTION1);
             g_params.push_back({edit, key, kind, adb::FlagKind::Value});
             y += 32;
@@ -347,8 +359,8 @@ int BuildParamBlock(HWND host, const adb::CommandSpec* spec, bool second, int y)
             HWND edit = MakeEdit(host, left, y, width - 96, editId, false);
             ::SendMessageW(edit, EM_SETCUEBANNER, TRUE,
                            reinterpret_cast<LPARAM>(L"点「截图取点」在手机截图上用鼠标点/拖"));
-            // 截图取点回填要靠 g_panel.summary，漏掉它坐标就"选完不显示"
-            g_panel.summary = edit;
+            // 截图取点的结果要写回"这一行自己的"输入框（见 BrowseForParam 的 setEdit）
+            if (editHwnd) *editHwnd = edit;
             g_panel.btnExtra = MakeButton(host, L"截图取点…", left + width - 92, y, 92, IDC_BTN_ACTION1);
             g_params.push_back({edit, key, kind, adb::FlagKind::Value});
             y += 32;
@@ -372,7 +384,7 @@ int BuildParamBlock(HWND host, const adb::CommandSpec* spec, bool second, int y)
             HWND edit = MakeEdit(host, left, y, width - 116, editId, false);
             ::SendMessageW(edit, EM_SETCUEBANNER, TRUE,
                            reinterpret_cast<LPARAM>(L"192.168.1.23:5555"));
-            g_panel.summary = edit;
+            if (editHwnd) *editHwnd = edit;
             g_params.push_back({edit, key, kind, adb::FlagKind::Value});
             MakeButton(host, L"扫描局域网…", left + width - 112, y, 112, btnId);
             y += 32;
@@ -407,6 +419,8 @@ int BuildParamBlock(HWND host, const adb::CommandSpec* spec, bool second, int y)
             int editW = width;
             if (hasBrowse) editW = width - (kind == adb::ParamKind::PackageName ? 96 : 76);
             HWND edit = MakeEdit(host, left, y, editW, editId, false);
+            // 这一行就是「浏览…」要回填的目标（APK / 镜像 / 目录 / 包名）
+            if (editHwnd) *editHwnd = edit;
             g_params.push_back({edit, key, kind, adb::FlagKind::Value});
             if (kind == adb::ParamKind::PackageName)
                 MakeButton(host, L"选择应用…", left + width - 92, y, 92, btnId);
@@ -442,17 +456,29 @@ int BuildFlagRows(HWND host, const adb::CommandSpec* spec, int y) {
 }
 
 // ------------------------------------------------------------ 浏览 / 选择
+// 每个参数行自己的输入框句柄（BuildParamBlock 创建控件时直接传出，不靠任何共享状态）
+HWND ParamEditHwnd(bool second) { return g_paramEdit[second ? 1 : 0]; }
+
 void BrowseForParam(HWND host, const adb::CommandSpec* spec, bool second) {
     if (!spec) return;
     const adb::ParamKind kind = second ? spec->param2 : spec->param;
 
+    // 回填失败必须是"看得见"的错误，不能再像以前那样静默丢弃
+    HWND target = ParamEditHwnd(second);
     auto setEdit = [&](const std::wstring& v) {
-        if (g_panel.summary) SetTextOf(g_panel.summary, v);
+        if (!target) {
+            const char* key = second ? spec->paramKey2 : spec->paramKey;
+            ADB_LOGW("param", L"参数 '%hs' 的回填目标为空，丢弃值=%ls",
+                     key ? key : "(null)", v.c_str());
+            SetStatus(L"回填失败：参数输入框不存在（请重选命令后重试）");
+            return;
+        }
+        SetTextOf(target, v);
         UpdatePreview();
     };
 
     if (kind == adb::ParamKind::PackageName) {
-        HWND edit = g_params.empty() ? nullptr : g_params.front().hwnd;
+        HWND edit = target ? target : (g_params.empty() ? nullptr : g_params.front().hwnd);
         ShowPackagePicker(host, !spec->pkgHideSystem,
                           [edit](const std::vector<std::wstring>& pkgs) {
             if (pkgs.empty() || !edit) return;
@@ -513,10 +539,7 @@ void BrowseForParam(HWND host, const adb::CommandSpec* spec, bool second) {
     }
     if (kind == adb::ParamKind::LanHost) {
         std::wstring picked;
-        if (ShowLanScanner(host, &picked)) {
-            if (g_panel.summary) SetTextOf(g_panel.summary, picked);
-            UpdatePreview();
-        }
+        if (ShowLanScanner(host, &picked)) setEdit(picked);
         return;
     }
     if (kind == adb::ParamKind::DeviceSerial) {
@@ -552,7 +575,7 @@ void PickWholeFolder(HWND host) {
     g_panel.files.clear();
     g_panel.wholeFolder = true;
     if (g_panel.chkFolder) ::SendMessageW(g_panel.chkFolder, BM_SETCHECK, BST_CHECKED, 0);
-    if (g_panel.summary) SetTextOf(g_panel.summary, FileSummary(g_panel));
+    if (g_filesSummary) SetTextOf(g_filesSummary, FileSummary(g_panel));
     UpdatePreview();
 }
 
@@ -569,7 +592,7 @@ void PickFilesFromFolder(HWND host) {
     for (const auto& c : chosen) g_panel.files.push_back(adb::JoinPath(d, c));
     g_panel.wholeFolder = false;
     if (g_panel.chkFolder) ::SendMessageW(g_panel.chkFolder, BM_SETCHECK, BST_UNCHECKED, 0);
-    if (g_panel.summary) SetTextOf(g_panel.summary, FileSummary(g_panel));
+    if (g_filesSummary) SetTextOf(g_filesSummary, FileSummary(g_panel));
     UpdatePreview();
 }
 LRESULT CALLBACK ParamHostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -601,7 +624,7 @@ LRESULT CALLBACK ParamHostProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     g_panel.files.clear();
                 }
                 g_panel.wholeFolder = on;
-                if (g_panel.summary) SetTextOf(g_panel.summary, FileSummary(g_panel));
+                if (g_filesSummary) SetTextOf(g_filesSummary, FileSummary(g_panel));
                 UpdatePreview();
                 return 0;
             }
@@ -731,6 +754,9 @@ void BuildParamPanel(HWND host, const adb::CommandSpec* spec) {
     g_flags.clear();
     g_items.clear();
     g_panel = PanelState{};
+    g_paramEdit[0] = nullptr;
+    g_paramEdit[1] = nullptr;
+    g_filesSummary = nullptr;
     g_panelHeightDesign = 0;
 
     if (!g_oldParamProc) {
@@ -745,9 +771,9 @@ void BuildParamPanel(HWND host, const adb::CommandSpec* spec) {
 
     int y = 0;
     if (spec->param != adb::ParamKind::None && spec->paramKey)
-        y = BuildParamBlock(host, spec, false, y);
+        y = BuildParamBlock(host, spec, false, y, &g_paramEdit[0]);
     if (spec->param2 != adb::ParamKind::None && spec->paramKey2)
-        y = BuildParamBlock(host, spec, true, y);
+        y = BuildParamBlock(host, spec, true, y, &g_paramEdit[1]);
     if (spec->flagCount) {
         // 下方没有参数时加一点呼吸空间
         if (spec->param == adb::ParamKind::None && spec->param2 == adb::ParamKind::None) y += 2;

@@ -20,6 +20,8 @@ permissions:
 env:
   # 可复现构建：固定时间戳，同源码 + 同 epoch → 产物逐字节一致
   SOURCE_DATE_EPOCH: "1700000000"
+  # ccache 总容量上限：本项目全部对象加起来远小于这个数
+  CCACHE_MAXSIZE: 256M
 
 jobs:
   # ------------------------------------------------------------------ 构建矩阵
@@ -31,11 +33,20 @@ jobs:
       matrix:
         config: [Debug, Release]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 用 action 自带的 msystem 环境（不硬编码安装路径：runner 可能装在
       # C:\msys64、D:\a\_temp 或 hostedtoolcache 下的任意位置）
+      #
+      # path-type: strict —— 只暴露 MSYS2 自己的路径。
+      # 用 inherit 时 runner 预装的 C:\mingw64\bin 会排在前面，
+      # "Get-Command g++" 拿到的是那套工具链而不是这里的 UCRT64，
+      # 版本与 ccache/运行库都对不上（实测踩到过）。
+      # 注意：这个 action 不一定把 MSYS2 装到 C:\msys64 ——
+      # runner 上实测落在 D:\a\_temp\setup-msys2，路径由它自己决定。
+      # 必须用它的 outputs.msys2-location，不能写死。
       - name: 安装 MSYS2 UCRT64 工具链
+        id: msys2
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
@@ -47,33 +58,88 @@ jobs:
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-ccache
 
+      # 把工具链目录、ccache 目录都算好写进 GITHUB_ENV，
+      # 后续步骤一律读这些变量，不在任何地方写死绝对路径。
+      - name: 解析工具链目录
+        shell: pwsh
+        run: |
+          $msys2 = "${{ steps.msys2.outputs.msys2-location }}"
+          if ([string]::IsNullOrWhiteSpace($msys2)) { throw "拿不到 MSYS2 安装位置" }
+          $ucrt = Join-Path $msys2 "ucrt64\bin"
+          Write-Host "MSYS2 根目录: $msys2"
+          Write-Host "工具链目录 : $ucrt"
+          if (-not (Test-Path $ucrt)) { throw "工具链目录不存在: $ucrt" }
+
+          # ccache 目录按「MSYS2 根目录 + 当前用户」拼，两者都不写死
+          $ccacheDir = Join-Path $msys2 ("home\" + $env:USERNAME + "\.ccache")
+          Write-Host "ccache 目录 : $ccacheDir"
+
+          "MSYS2_ROOT=$msys2"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "UCRT_BIN=$ucrt"        | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CCACHE_DIR=$ccacheDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: 缓存 ccache
-        uses: actions/cache@v4
+        id: ccache
+        uses: actions/cache@v6
         with:
-          path: C:\msys64\home\runneradmin\.ccache
+          # 用上一步写入 GITHUB_ENV 的 CCACHE_DIR
+          path: ${{ env.CCACHE_DIR }}
           key: ccache-${{ matrix.config }}-${{ hashFiles('src/**') }}
           restore-keys: ccache-${{ matrix.config }}-
 
       - name: 配置
         shell: pwsh
         run: |
-          # 编译器路径从 PATH 里解析，不假设 MSYS2 装在哪
-          $gxx = (Get-Command g++.exe -ErrorAction Stop).Source
-          $rc  = (Get-Command windres.exe -ErrorAction Stop).Source
+          # 编译器/ccache 路径来自上一步算好的 UCRT_BIN（由 action 决定，
+          # 不写死）：runner 上的 MSYS2 可能装在任意目录。
+          $ucrt   = $env:UCRT_BIN
+          if ([string]::IsNullOrWhiteSpace($ucrt)) { throw "UCRT_BIN 未设置" }
+          $gxx    = Join-Path $ucrt "g++.exe"
+          $rc     = Join-Path $ucrt "windres.exe"
+          $ccache = Join-Path $ucrt "ccache.exe"
+          foreach ($p in @($gxx, $rc, $ccache)) {
+            if (-not (Test-Path $p)) { throw "缺少 $p" }
+          }
           Write-Host "g++     : $gxx"
           Write-Host "windres : $rc"
+          Write-Host "ccache  : $ccache"
+          Write-Host "CCACHE_DIR : $env:CCACHE_DIR"
+          # 自诊断：把这些目录前置到 PATH，避免 cmake/ninja/ccache 内部
+          # 再去 PATH 里找编译器时命中 runner 预装的 C:\mingw64
+          $env:PATH = "$ucrt;" + $env:PATH
+          Write-Host "PATH 首位: $($env:PATH.Split(';')[0])"
+          Write-Host "which g++: $((Get-Command g++.exe -ErrorAction SilentlyContinue).Source)"
+          if (Test-Path $env:CCACHE_DIR) {
+            $n = (Get-ChildItem $env:CCACHE_DIR -Recurse -File -ErrorAction SilentlyContinue |
+                  Measure-Object).Count
+            Write-Host "缓存目录已有 $n 个文件"
+          } else {
+            Write-Host "缓存目录不存在（首次构建）"
+          }
           cmake -S . -B build/${{ matrix.config }} -G Ninja `
             -DCMAKE_BUILD_TYPE=${{ matrix.config }} `
             -DADB_WERROR=ON `
             "-DCMAKE_CXX_COMPILER=$($gxx -replace '\\','/')" `
-            "-DCMAKE_RC_COMPILER=$($rc -replace '\\','/')"
+            "-DCMAKE_RC_COMPILER=$($rc -replace '\\','/')" `
+            "-DCMAKE_CXX_COMPILER_LAUNCHER=$($ccache -replace '\\','/')"
 
       - name: 构建
         shell: pwsh
-        run: cmake --build build/${{ matrix.config }}
+        run: |
+          # 并行度：Ninja 默认已按逻辑核数，这里显式写出来便于日志核对
+          $jobs = [Environment]::ProcessorCount
+          Write-Host "并行度: $jobs（逻辑核数）"
+          cmake --build build/${{ matrix.config }} --parallel $jobs
+
+      - name: ccache 统计
+        if: always()
+        shell: pwsh
+        run: |
+          $ccache = Join-Path $env:UCRT_BIN "ccache.exe"
+          if (Test-Path $ccache) { & $ccache --show-stats }
 
       - name: 上传二进制
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: adbrt-binaries-${{ matrix.config }}
           path: build/${{ matrix.config }}/src/gui/AdbRT.exe
@@ -84,10 +150,22 @@ jobs:
     needs: build
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      # 打包要收集运行时 DLL，用 objdump 从 exe 的导入表反推，
+      # 所以这里也需要同一套 MSYS2 UCRT64 工具链。
+      - name: 安装 MSYS2 UCRT64 工具链
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          path-type: inherit
+          install: >-
+            mingw-w64-ucrt-x86_64-binutils
 
       - name: 取回 Release 产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: adbrt-binaries-Release
 
@@ -101,13 +179,18 @@ jobs:
       - name: 组装发布包
         shell: pwsh
         run: |
-          # 运行时 DLL 必须取「本次构建配套」的那一份：显式传入工具链 bin，
-          # 不要依赖 runner 上 PATH 的巧合顺序（PATH 里可能有别处的同名副本）。
-          $toolBin = Split-Path -Parent (Get-Command g++.exe -ErrorAction Stop).Source
+          # 运行时 DLL 必须取「本次构建配套」的那一份：显式传入工具链 bin。
+          # 路径来自 setup-msys2 的输出 —— runner 上的安装位置不固定，
+          # 也不能用 PATH 解析（那里可能先命中 runner 预装的 C:\mingw64）。
+          $toolBin = Join-Path "${{ steps.msys2.outputs.msys2-location }}" "ucrt64\bin"
+          if (-not (Test-Path (Join-Path $toolBin "objdump.exe"))) {
+            throw "缺少 objdump.exe：$toolBin"
+          }
+          Write-Host "工具链 bin: $toolBin"
           pwsh -NoProfile -File packaging/scripts/build-release.ps1 -Config Release -ToolBin $toolBin
 
       - name: 上传发布包
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: AdbRT-release
           path: build/dist/AdbRT-*-win-x64.zip
@@ -123,10 +206,10 @@ jobs:
       github.event.inputs.tag != ''
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 取回发布包
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: AdbRT-release
           path: dist
