@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../core/adb_runner.h"
+#include "../core/bounded_text.h"
 #include "../core/device.h"
 #include "../core/parsers.h"
 #include "../core/settings.h"
@@ -68,57 +69,152 @@ DWORD WINAPI CaptureWorker(LPVOID param) {
 }
 
 // ---------------------------------------------------------------- logcat
+// 内存策略：见 windows2.cpp 顶部说明与 gui.h 的常量。
+//   · 行数据放在有界 BoundedText 里（字节预算），不再是无上限的 vector
+//   · 界面增量追加：记住已经渲染到第几行，只贴新增的部分
+//   · 只有在过滤条件变化 / 缓冲区回绕（旧行被丢）时才重建全文
+constexpr size_t kLogBudgetBytes = 4 * 1024 * 1024;   // 日志缓冲上限（UTF-16 字）
+
+// 后台 logcat 线程与窗口共享的状态：线程只认这个，
+// 窗口关掉时置 stop，线程随后看到的都是安全数据，不会踩已释放的窗口对象。
+struct LogShared {
+    std::atomic<bool> stop{false};
+    std::atomic<bool> paused{false};
+    std::mutex mutex;
+    adb::BoundedText lines{kLogBudgetBytes, 16 * 1024};
+    HWND edit = nullptr;      // 仅用于 PostMessage 通知刷新
+};
+
 struct LogCtx {
     HWND   edit = nullptr;
     HWND   filterEdit = nullptr;
     HWND   pauseBtn = nullptr;
-    HANDLE process = nullptr;
-    std::atomic<bool> stop{false};
-    std::atomic<bool> paused{false};
-    std::vector<std::wstring> lines;
-    size_t cap = 4000;
+    std::shared_ptr<LogShared> shared;
+    size_t cap = 4000;        // 界面上最多渲染多少行
     std::wstring filter;
-    std::mutex mutex;
+
+    // 增量渲染的游标
+    size_t renderedUpTo = 0;  // 已经贴进控件的总行号（含被丢弃的）
+    size_t renderedRows = 0;  // 控件里当前有多少行
 };
 
 LRESULT CALLBACK LogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
-void LogRefresh(LogCtx* ctx) {
+// 把一段行贴进控件，并保持行数不超过 cap
+void LogAppendRows(LogCtx* ctx, const std::vector<std::wstring>& rows) {
+    if (!ctx || !ctx->edit || rows.empty()) return;
     std::wstring text;
+    for (const auto& r : rows) { text += r; text += L"\r\n"; }
+    AppendTextToEdit(ctx->edit, text);
+    ctx->renderedRows += rows.size();
+}
+
+// 全量重建（过滤变化、或者后台缓冲已经回绕丢掉旧行时必须走这里）
+void LogRebuild(LogCtx* ctx) {
+    if (!ctx || !ctx->edit) return;
+    auto shared = ctx->shared;
     std::wstring f = adb::ToLowerAscii(ctx->filter);
+
+    std::vector<std::wstring> rows;
+    size_t total = 0;
     {
-        std::lock_guard<std::mutex> lk(ctx->mutex);
-        size_t start = ctx->lines.size() > ctx->cap ? ctx->lines.size() - ctx->cap : 0;
-        for (size_t i = start; i < ctx->lines.size(); ++i) {
-            if (!f.empty() && adb::ToLowerAscii(ctx->lines[i]).find(f) == std::wstring::npos) continue;
-            text += ctx->lines[i];
-            text += L"\r\n";
-        }
+        std::lock_guard<std::mutex> lk(shared->mutex);
+        total = shared->lines.TotalLines();
+        shared->lines.CopyLines(0, 0, &rows);
+    }
+
+    std::wstring text;
+    size_t shown = 0;
+    // 只取最后 cap 行参与渲染，避免一次性拼几 MB
+    size_t begin = rows.size() > ctx->cap ? rows.size() - ctx->cap : 0;
+    for (size_t i = begin; i < rows.size(); ++i) {
+        if (!f.empty() && adb::ToLowerAscii(rows[i]).find(f) == std::wstring::npos) continue;
+        text += rows[i];
+        text += L"\r\n";
+        ++shown;
     }
     SetTextOf(ctx->edit, text);
     ScrollToEnd(ctx->edit);
+
+    ctx->renderedUpTo = total;
+    ctx->renderedRows = shown;
 }
 
+// 增量刷新：只贴新增的行；缓冲回绕或过滤变化时退回全量重建
+void LogRefresh(LogCtx* ctx) {
+    if (!ctx || !ctx->edit) return;
+    auto shared = ctx->shared;
+
+    size_t total = 0;
+    std::vector<std::wstring> rows;
+    {
+        std::lock_guard<std::mutex> lk(shared->mutex);
+        total = shared->lines.TotalLines();
+        shared->lines.CopyLines(0, 0, &rows);
+    }
+
+    // 缓冲区里现存的行数少于"累计行号"，说明旧行被预算挤掉了 —— 无法增量
+    const size_t kept = rows.size();
+    const size_t firstKept = total >= kept ? total - kept : 0;
+    if (ctx->renderedUpTo < firstKept || total < ctx->renderedUpTo) {
+        LogRebuild(ctx);
+        return;
+    }
+
+    const size_t skip = ctx->renderedUpTo - firstKept;
+    if (skip >= rows.size()) return;          // 没有新行
+
+    std::wstring f = adb::ToLowerAscii(ctx->filter);
+    std::vector<std::wstring> fresh;
+    fresh.reserve(rows.size() - skip);
+    for (size_t i = skip; i < rows.size(); ++i) {
+        if (!f.empty() && adb::ToLowerAscii(rows[i]).find(f) == std::wstring::npos) continue;
+        fresh.push_back(rows[i]);
+        if (fresh.size() >= ctx->cap) break;
+    }
+
+    if (!fresh.empty()) {
+        // 控件里行数已经到顶：先整体重建，避免无限长
+        if (ctx->renderedRows + fresh.size() > ctx->cap) {
+            LogRebuild(ctx);
+            return;
+        }
+        LogAppendRows(ctx, fresh);
+        FollowTailIfAtBottom(ctx->edit);
+        ctx->renderedUpTo = total;
+    } else {
+        ctx->renderedUpTo = total;
+    }
+}
+
+// 后台 logcat 线程：只持有 shared state 与 edit 的数值句柄，
+// 窗口销毁后 PostMessage 会失败，但绝不会解引用已释放的对象。
+struct LogArg {
+    std::shared_ptr<LogShared> shared;
+    HWND notify = nullptr;      // 用来 PostMessage 的窗口（父窗口）
+};
+
 DWORD WINAPI LogWorker(LPVOID param) {
-    auto* ctx = static_cast<LogCtx*>(param);
+    std::unique_ptr<LogArg> arg(static_cast<LogArg*>(param));
+    auto shared = arg->shared;
+    HWND notify = arg->notify;
     auto& session = adb::DeviceSession::Instance();
 
     adb::RunOptions opts;
-    opts.cancel = &ctx->stop;
-    opts.sink = [ctx](const std::string& line, bool) -> bool {
-        if (ctx->stop.load()) return false;
-        if (ctx->paused.load()) return true;
+    opts.cancel = &shared->stop;
+    opts.sink = [shared, notify](const std::string& line, bool) -> bool {
+        if (shared->stop.load()) return false;
+        if (shared->paused.load()) return true;
         {
-            std::lock_guard<std::mutex> lk(ctx->mutex);
-            ctx->lines.push_back(adb::Utf8ToWide(line));
-            if (ctx->lines.size() > 20000) ctx->lines.erase(ctx->lines.begin(),
-                                                            ctx->lines.begin() + 10000);
+            std::lock_guard<std::mutex> lk(shared->mutex);
+            // 有界缓冲：超过字节预算自动丢最旧的行，长时间跑也不会吃干内存
+            shared->lines.Append(adb::Utf8ToWide(line));
         }
-        ::PostMessageW(::GetParent(ctx->edit), WM_APP + 40, 0, 0);
-        return !ctx->stop.load();
+        if (notify) ::PostMessageW(notify, WM_APP + 40, 0, 0);
+        return !shared->stop.load();
     };
     adb::RunProcess(session.AdbExe(), session.WithSerial({L"logcat", L"-v", L"threadtime"}), opts);
-    ::PostMessageW(::GetParent(ctx->edit), WM_APP + 41, 0, 0);
+    if (notify) ::PostMessageW(notify, WM_APP + 41, 0, 0);
     return 0;
 }
 
@@ -134,6 +230,9 @@ LRESULT CALLBACK LogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ctx->edit = ::CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
                 0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(IDC_EDIT_OUTPUT), nullptr, nullptr);
+            // 日志框会被频繁追加，先放开 30000 字符的默认上限
+            RelaxEditLimit(ctx->edit);
+
             ctx->pauseBtn = ::CreateWindowExW(0, L"BUTTON", L"暂停",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd,
                 reinterpret_cast<HMENU>(IDC_BTN_PAUSE), nullptr, nullptr);
@@ -149,7 +248,14 @@ LRESULT CALLBACK LogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             for (HWND b : {ctx->pauseBtn, save, clearBtn}) ApplyFont(b, CreateUiFont(9, false));
 
             ::SetWindowTextW(hwnd, L"实时日志");
-            ::CreateThread(nullptr, 0, LogWorker, ctx, 0, nullptr);
+
+            ctx->shared = std::make_shared<LogShared>();
+            ctx->shared->edit = ctx->edit;
+            auto* arg = new LogArg{ctx->shared, hwnd};
+            DWORD tid = 0;
+            HANDLE th = ::CreateThread(nullptr, 0, LogWorker, arg, 0, &tid);
+            if (th) ::CloseHandle(th);
+            else delete arg;
             return 0;
         }
         case WM_SIZE: {
@@ -169,13 +275,18 @@ LRESULT CALLBACK LogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (id == IDC_BTN_PAUSE) {
-                bool nowPaused = !ctx->paused.load();
-                ctx->paused = nowPaused;
+                bool nowPaused = !ctx->shared->paused.load();
+                ctx->shared->paused = nowPaused;
                 ::SetWindowTextW(ctx->pauseBtn, nowPaused ? L"继续" : L"暂停");
                 return 0;
             }
             if (id == IDC_BTN_ACTION2) {
-                { std::lock_guard<std::mutex> lk(ctx->mutex); ctx->lines.clear(); }
+                {
+                    std::lock_guard<std::mutex> lk(ctx->shared->mutex);
+                    ctx->shared->lines.Clear();
+                }
+                ctx->renderedUpTo = 0;
+                ctx->renderedRows = 0;
                 SetTextOf(ctx->edit, L"");
                 return 0;
             }
@@ -196,8 +307,10 @@ LRESULT CALLBACK LogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (!::GetSaveFileNameW(&ofn)) return 0;
                 std::wstring all;
                 {
-                    std::lock_guard<std::mutex> lk(ctx->mutex);
-                    for (const auto& l : ctx->lines) { all += l; all += L"\r\n"; }
+                    std::lock_guard<std::mutex> lk(ctx->shared->mutex);
+                    std::vector<std::wstring> rows;
+                    ctx->shared->lines.CopyLines(0, 0, &rows);
+                    for (const auto& l : rows) { all += l; all += L"\r\n"; }
                 }
                 HANDLE h = ::CreateFileW(buf, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                                          FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -224,12 +337,17 @@ LRESULT CALLBACK LogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ::SetWindowTextW(hwnd, L"实时日志（已结束）");
             return 0;
         case WM_CLOSE:
-            ctx->stop = true;
+            if (ctx && ctx->shared) ctx->shared->stop = true;
             ::DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
-            if (ctx) { ctx->stop = true; ::Sleep(150); }
-            delete ctx;
+            if (ctx) {
+                ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                // 只置取消位就释放窗口上下文：后台线程持有 shared_ptr，
+                // 之后它只会看到 stop=true 并自行退出，不会碰到已释放的对象。
+                if (ctx->shared) ctx->shared->stop = true;
+                delete ctx;
+            }
             return 0;
         default: break;
     }

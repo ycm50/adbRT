@@ -6,10 +6,14 @@
 #include <string>
 #include <vector>
 
+#include "../core/adb_runner.h"
 #include "../core/command_builder.h"
+#include "../core/bounded_text.h"
 #include "../core/core.h"
 #include "../core/parsers.h"
+#include "../core/apk_res.h"
 #include "../core/settings.h"
+#include "fixture_loader.h"
 
 namespace {
 
@@ -73,11 +77,100 @@ int main() {
     Check(adb::IsValidPartitionName(L"boot_a"), "分区名合法");
     Check(!adb::IsValidPartitionName(L"boot;rm -rf"), "分区名拒绝注入");
 
+    // ---------------------------------------------------------- APK 应用名称解析
+    {
+        std::vector<uint8_t> manifest;
+        Check(adbtest::LoadFixture(L"fixture.manifest.bin", &manifest), "读取 manifest 样本");
+
+        adb::ManifestLabel ml;
+        Check(adb::ParseManifestLabel(manifest, &ml), "解析 manifest 的 android:label");
+        Check(ml.hasLiteral, "样本里 label 是字符串字面量");
+        CheckEq(ml.literal, L"AdbRT 测试应用", "取到应用名称");
+
+        CheckEq(adb::ResolveAppLabel(manifest, {}), L"AdbRT 测试应用", "两步合一路径");
+
+        // 坏输入必须安全返回，不能崩
+        std::vector<uint8_t> junk = {0, 1, 2, 3, 4, 5, 6, 7};
+        adb::ManifestLabel bad;
+        Check(!adb::ParseManifestLabel(junk, &bad), "垃圾数据解析失败但不崩");
+        std::wstring none;
+        Check(!adb::LookupStringResource(junk, 0x7f010000, &none), "垃圾 arsc 安全失败");
+        Check(adb::ResolveAppLabel({}, {}).empty(), "空输入返回空串");
+        Check(adb::ResolveAppLabel(junk, junk).empty(), "全垃圾输入返回空串");
+    }
+
+    // ---------------------------------------------------------- 多值包名展开
+    {
+        const adb::CommandSpec* clr = adb::FindCommandByKey("app.clearData");
+        Check(clr != nullptr, "找到 app.clearData");
+        if (clr) {
+            adb::BuildInput in;
+            in.spec = clr;
+            in.toolExe = L"adb.exe";
+            in.serial = L"S1";
+            in.params["pkg"] = L"com.a;com.b;com.c";
+            adb::BuiltCommand out;
+            adb::BuildError err;
+            bool ok = adb::BuildCommand(in, &out, &err);
+            Check(ok, "多值包名构造成功");
+            Check(out.argvList.size() == 3, "一个值一条命令");
+            if (out.argvList.size() == 3) {
+                CheckEq(out.argvList[0].back(), L"com.a", "第 1 条用第一个包");
+                CheckEq(out.argvList[1].back(), L"com.b", "第 2 条用第二个包");
+                CheckEq(out.argvList[2].back(), L"com.c", "第 3 条用第三个包");
+                CheckEq(out.argvList[0][0], L"-s", "每条都带 -s");
+            }
+
+            // 单个包仍然只产出一条命令
+            in.params["pkg"] = L"com.only";
+            adb::BuiltCommand one;
+            adb::BuildError err2;
+            Check(adb::BuildCommand(in, &one, &err2), "单包构造成功");
+            Check(one.argvList.size() == 1, "单包只产出一条命令");
+            if (!one.argvList.empty()) CheckEq(one.argvList[0].back(), L"com.only", "单包值正确");
+        }
+    }
+
+    // ---------------------------------------------------------- 模板与参数一致性
+    {
+        // 每条命令的模板占位符都必须能在 spec 里找到对应的参数 key，
+        // 否则运行时会得到"缺少参数"这种本可以在构造期发现的错误。
+        int mismatched = 0;
+        for (size_t i = 0; i < adb::CommandTableSize(); ++i) {
+            const auto& c = adb::CommandTable()[i];
+            if (!c.argvTemplate) continue;
+            std::wstring tpl = adb::Utf8ToWide(c.argvTemplate);
+            std::vector<std::wstring> declared;
+            if (c.paramKey) declared.push_back(adb::Utf8ToWide(c.paramKey));
+            if (c.paramKey2) declared.push_back(adb::Utf8ToWide(c.paramKey2));
+            size_t pos = 0;
+            while ((pos = tpl.find(L'{', pos)) != std::wstring::npos) {
+                size_t end = tpl.find(L'}', pos);
+                if (end == std::wstring::npos) break;
+                std::wstring name = tpl.substr(pos + 1, end - pos - 1);
+                pos = end + 1;
+                if (name == L"flags" || name == L"paths") continue;
+                // {key?} = 可选占位，去掉问号再比对
+                if (!name.empty() && name.back() == L'?') name.pop_back();
+                bool found = false;
+                for (const auto& d : declared) if (d == name) { found = true; break; }
+                if (!found) {
+                    ++mismatched;
+                    std::printf("  [mismatch] %s 模板占位符 {%s} 没有对应参数\n",
+                                c.key, adb::WideToUtf8(name).c_str());
+                }
+            }
+        }
+        Check(mismatched == 0, "所有模板占位符都有对应的参数定义");
+    }
+
     // ---------------------------------------------------------- 坐标注入防护
     {
         Check(adb::IsValidCoords(L"640 1200", 2), "坐标 2 段合法");
         Check(adb::IsValidCoords(L"640 1600 640 800 300", 5), "坐标 5 段合法");
         Check(!adb::IsValidCoords(L"640", 2), "坐标段数不足被拒");
+        Check(adb::IsValidCoords(L"640 1200 640 400", 4), "滑动 4 段合法（时长另给）");
+        Check(!adb::IsValidCoords(L"640 1200 640 400 300 9", 5), "滑动 6 段被拒");
         Check(!adb::IsValidCoords(L"640;reboot", 2), "坐标里的分号被拒");
         Check(!adb::IsValidCoords(L"640 1200 && rm -rf /", 2), "坐标里的 && 被拒");
         Check(!adb::IsValidCoords(L"$(reboot) 1", 2), "坐标里的 $() 被拒");
@@ -191,6 +284,63 @@ int main() {
         adb::BuildError err;
         Check(!adb::BuildCommand(bad, &out, &err), "缺少 APK 参数时构造失败");
         Check(!err.message.empty(), "失败时给出中文原因");
+    }
+
+    // ---------------------------------------------------------- 有界文本缓冲
+    {
+        // 预算是 100 字，单行上限 10 字
+        adb::BoundedText buf(100, 32);
+        for (int i = 0; i < 20; ++i) {                 // 20 行 × 12 字 = 240 字，远超预算
+            buf.Append(std::to_wstring(i) + L"0123456789");
+        }
+        Check(buf.PendingBytes() <= 100, "超出预算后占用不超过上限");
+        Check(buf.DroppedBytes() > 0, "超预算的内容被记账丢弃");
+
+        // 丢弃的是最旧的：剩下的最后一行一定是最新追加的
+        std::vector<std::wstring> rows;
+        buf.CopyLines(0, 0, &rows);
+        Check(!rows.empty(), "丢旧留新后仍有内容");
+        if (!rows.empty()) CheckEq(rows.back(), L"190123456789", "保留的是最新的行");
+
+        // 超长行被截断且不突破预算
+        adb::BoundedText small(100, 8);
+        Check(!small.Append(L"123456789012345"), "超长行返回 false（已截断）");
+        Check(small.Truncated(), "截断标记被置位");
+        Check(small.PendingBytes() <= 100 + 32, "截断后仍在预算附近");
+
+        // TakeBatch 只取走一部分，剩下的留在缓冲里
+        adb::BoundedText chunked(1024, 1024);
+        for (int i = 0; i < 10; ++i) chunked.Append(L"abcdefghij");
+        size_t before = chunked.PendingLines();
+        std::wstring part = chunked.TakeBatch(30);
+        Check(!part.empty(), "分批取走有内容");
+        Check(chunked.PendingLines() < before, "分批取走后缓冲减少");
+        Check(chunked.PendingBytes() > 0, "分批取走后仍有剩余");
+
+        // 清空后计数归零
+        chunked.Clear();
+        Check(chunked.PendingBytes() == 0 && chunked.PendingLines() == 0, "清空后归零");
+        Check(chunked.TotalLines() == 0, "清空后累计行数归零");
+
+        // 累计行数包含被丢弃的行：增量渲染靠它判断是否回绕
+        adb::BoundedText roll(40, 40);
+        for (int i = 0; i < 20; ++i) roll.Append(L"0123456789");
+        Check(roll.TotalLines() == 20, "累计行数统计正确");
+        Check(roll.PendingLines() < 20, "内部确实发生了丢旧");
+    }
+
+    // ---------------------------------------------------------- 常驻 server 判定
+    {
+        // adb 会 fork 常驻 server，挂 KILL_ON_JOB_CLOSE 的 Job 会在
+        // 调用结束时把它连坐杀掉（每条命令都重启服务）。
+        Check(adb::IsPersistentServerTool(L"A:\\platform-tools\\adb.exe"),
+              "adb.exe 判定为常驻 server 工具");
+        Check(adb::IsPersistentServerTool(L"adb.exe"), "裸 adb.exe 也判定");
+        Check(adb::IsPersistentServerTool(L"C:\\x\\ADB.EXE"), "大小写不敏感");
+        Check(!adb::IsPersistentServerTool(L"A:\\platform-tools\\fastboot.exe"),
+              "fastboot 不是常驻 server 工具");
+        Check(!adb::IsPersistentServerTool(L""),
+              "空路径不误判");
     }
 
     // ---------------------------------------------------------- 配置

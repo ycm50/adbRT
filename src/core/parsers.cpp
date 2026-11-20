@@ -118,6 +118,30 @@ const std::vector<KeyEvent>& StandardKeyEvents() {
     return k;
 }
 
+const std::vector<std::wstring>& CommonPartitions() {
+    static const std::vector<std::wstring> k = {
+        L"boot", L"init_boot", L"vendor_boot", L"recovery", L"dtbo", L"vbmeta",
+        L"vbmeta_system", L"super", L"system", L"vendor", L"product", L"system_ext",
+        L"userdata", L"cache", L"metadata", L"persist", L"modem", L"abl", L"xbl",
+        L"tz", L"hyp", L"devcfg", L"misc",
+    };
+    return k;
+}
+
+const std::vector<std::wstring>& CommonProps() {
+    static const std::vector<std::wstring> k = {
+        L"ro.product.model", L"ro.product.brand", L"ro.product.manufacturer",
+        L"ro.product.device", L"ro.build.version.release", L"ro.build.version.sdk",
+        L"ro.build.version.incremental", L"ro.build.type", L"ro.build.tags",
+        L"ro.serialno", L"ro.bootloader", L"ro.hardware", L"ro.board.platform",
+        L"ro.debuggable", L"ro.secure", L"ro.build.fingerprint",
+        L"persist.sys.locale", L"persist.sys.timezone", L"gsm.sim.state",
+        L"gsm.operator.alpha", L"ro.sf.lcd_density", L"ro.product.cpu.abi",
+        L"sys.boot_completed", L"sys.usb.state", L"service.adb.tcp.port",
+    };
+    return k;
+}
+
 std::vector<std::wstring> ParsePartitions(const std::wstring& output) {
     std::vector<std::wstring> out;
     for (const auto& rawLine : SplitLines(output)) {
@@ -153,6 +177,50 @@ int ParseProgressPercent(const std::wstring& line) {
     if (b == pct) return -1;
     int v = _wtoi(line.substr(b, pct - b).c_str());
     return (v >= 0 && v <= 100) ? v : -1;
+}
+
+std::vector<std::wstring> ParseConnectCandidates(const std::wstring& output) {
+    // 同时兼容两种输出：
+    //   · adb mdns services → "adb-XXXX	_system-adb._tcp.	192.168.1.7:39145"
+    //   · 已经连过的设备 → "192.168.1.7:5555	device"
+    std::vector<std::wstring> out;
+    for (const auto& rawLine : SplitLines(output)) {
+        std::wstring line = Trim(rawLine);
+        if (line.empty()) continue;
+        std::vector<std::wstring> tok = SplitWhitespace(line);
+        if (tok.empty()) continue;
+        std::wstring cand = tok.back();
+        // 只接受 host:port 形态
+        size_t colon = cand.rfind(L':');
+        if (colon == std::wstring::npos || colon == 0 || colon + 1 >= cand.size()) continue;
+        bool ok = true;
+        for (size_t i = 0; i < colon; ++i) {
+            wchar_t ch = cand[i];
+            if (!((ch >= L'0' && ch <= L'9') || ch == L'.')) { ok = false; break; }
+        }
+        if (!ok) continue;
+        for (size_t i = colon + 1; i < cand.size(); ++i)
+            if (cand[i] < L'0' || cand[i] > L'9') { ok = false; break; }
+        if (!ok) continue;
+        if (std::find(out.begin(), out.end(), cand) == out.end()) out.push_back(cand);
+    }
+    return out;
+}
+
+void SortLanHosts(std::vector<std::wstring>* hosts) {
+    if (!hosts) return;
+    auto key = [](const std::wstring& ip) -> uint32_t {
+        uint32_t v = 0;
+        int part = 0;
+        for (wchar_t c : ip) {
+            if (c == L'.') { v = (v << 8) | static_cast<uint32_t>(part & 0xFF); part = 0; continue; }
+            if (c < L'0' || c > L'9') { part = 0; continue; }
+            part = part * 10 + (c - L'0');
+        }
+        return (v << 8) | static_cast<uint32_t>(part & 0xFF);
+    };
+    std::sort(hosts->begin(), hosts->end(),
+              [&](const std::wstring& a, const std::wstring& b) { return key(a) < key(b); });
 }
 
 std::wstring ExplainAdbError(const std::wstring& err) {

@@ -1,5 +1,5 @@
 # 无窗口核心单元测试（不依赖设备、不依赖桌面会话）
-add_executable(AdbRT.CoreTests core_tests.cpp)
+add_executable(AdbRT.CoreTests core_tests.cpp fixture_loader.cpp)
 
 target_include_directories(AdbRT.CoreTests PRIVATE
   "${CMAKE_SOURCE_DIR}/src/core"
@@ -14,3 +14,8 @@ add_executable(fake-adb fake_adb.cpp)
 if(MINGW)
   target_link_options(fake-adb PRIVATE -municode)
 endif()
+# 标签解析器的测试样本：拷到可执行文件旁边供 fixture_loader 读取
+foreach(fixture fixture.manifest.bin)
+  configure_file("${CMAKE_CURRENT_SOURCE_DIR}/${fixture}"
+                 "${CMAKE_CURRENT_BINARY_DIR}/${fixture}" COPYONLY)
+endforeach()

@@ -23,6 +23,7 @@ struct RunResult {
     std::string  stderrUtf8;
     std::wstring error;      // 启动失败时的中文原因
     uint64_t     elapsedMs = 0;
+    size_t       droppedBytes = 0;   // 因超出捕获上限被丢掉的字节数
 
     std::wstring OutW() const { return Utf8ToWide(stdoutUtf8); }
     std::wstring ErrW() const { return Utf8ToWide(stderrUtf8); }
@@ -38,6 +39,36 @@ struct RunOptions {
     std::atomic<bool>* cancel = nullptr;   // 可空
     uint32_t     timeoutMs = 0;       // 0 = 不超时
 };
+
+// ---------------------------------------------------------------------------
+// 为什么要区分"会不会 fork 常驻进程"的工具
+//
+// RunProcess 给子进程挂了一个 KILL_ON_JOB_CLOSE 的 Job，用来在取消时
+// 连整棵子进程树一起结束。但 adb 客户端发现 server 没跑时，会 fork 出
+// "adb -L tcp:5037 fork-server server" 并让它常驻 —— 这个 server 会
+// 继承同一个 Job，于是 RunProcess 一返回、Job 句柄一关，server 就被连坐杀掉。
+// 下一条命令又要重新 fork/启动 server，每条命令都卡上 0.5~1.5 秒。
+//
+// 实测（关 Job 后观察 fork 出的常驻进程）：
+//   不挂 Job -> 存活；挂 KILL_ON_JOB_CLOSE 的 Job -> 被杀。
+//
+// 所以对 adb 这类自带常驻 server 的工具不挂 Job：取消时退化成只结束直接
+// 子进程，server 作为共享资源留着（杀它反而有害）。
+// ---------------------------------------------------------------------------
+bool IsPersistentServerTool(const std::wstring& exe);
+
+// ---------------------------------------------------------------------------
+// 输出捕获的内存上限（唯一真相源，GUI 与测试共用）
+//
+// 为什么需要：RunProcess 原来把整份 stdout/stderr 一股脑 append 进
+// std::string，进程活多久它就长多久。一条 logcat 或 ls -R 能吃掉几百 MB，
+// 这是"越用越卡"的第一号原因。现在改成有预算的捕获：
+//   · 单行超过 kMaxLineBytes 就截断（超长行通常是无换行的二进制垃圾）
+//   · 累计超过 kMaxCaptureBytes 就丢掉最旧的一半，并记账丢弃字节数
+// 生产端（读线程）永不因为这条上限等待 —— 阻塞会写满 adb 的管道把它卡死。
+// ---------------------------------------------------------------------------
+constexpr size_t kMaxLineBytes    = 8 * 1024;          // 单行上限
+constexpr size_t kMaxCaptureBytes = 2 * 1024 * 1024;   // 每条流捕获上限
 
 // 同步执行，阻塞直到结束。严重错误（找不到 exe）通过 result.error 返回。
 RunResult RunProcess(const std::wstring& exe, const std::vector<std::wstring>& argv,

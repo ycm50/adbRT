@@ -11,7 +11,12 @@
 
 int wmain(int argc, wchar_t** argv) {
     std::vector<std::wstring> args;
-    for (int i = 1; i < argc; ++i) args.push_back(argv[i]);
+    for (int i = 1; i < argc; ++i) {
+        // 跳过 adb 的全局选项（-s <serial> / -d / -e），只保留子命令
+        if (argv[i] == std::wstring(L"-s") && i + 1 < argc) { ++i; continue; }
+        if (argv[i] == std::wstring(L"-d") || argv[i] == std::wstring(L"-e")) continue;
+        args.push_back(argv[i]);
+    }
 
     auto has = [&](const wchar_t* s) {
         for (const auto& a : args) if (a == s) return true;
@@ -37,7 +42,12 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     }
     if (startsWith(L"shell")) {
-        std::wstring cmd = args.size() > 1 ? args[1] : L"";
+        // shell 后面的每个参数都是独立 argv，拼起来才是完整命令
+        std::wstring cmd;
+        for (size_t i = 1; i < args.size(); ++i) {
+            if (i > 1) cmd += L" ";
+            cmd += args[i];
+        }
         if (cmd.find(L"getprop ro.product.model") != std::wstring::npos) {
             std::printf("FakePhone\n");
         } else if (cmd.find(L"getprop") != std::wstring::npos) {

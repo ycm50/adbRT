@@ -11,10 +11,12 @@
 #include "../core/adb_runner.h"
 #include "../core/command_builder.h"
 #include "../core/core.h"
+#include "../core/bounded_text.h"
 #include "../core/device.h"
 #include "../core/parsers.h"
 #include "../core/settings.h"
 #include "gui.h"
+#include "ui_util.h"
 #include "version.h"
 
 namespace adbgui {
@@ -160,7 +162,7 @@ int RunSelfTest(const std::wstring& reportPath) {
         const char* kBuiltin[] = {
             "device.list", "device.select", "device.info",
             "app.list", "app.pullApk",
-            "file.browse", "screen.capture", "logcat.live", "shell.terminal",
+            "screen.capture", "logcat.live", "shell.terminal",
             "tool.settings", "tool.about", "tool.doctor", "tool.openToolsDir",
         };
         int missing = 0;
@@ -180,6 +182,58 @@ int RunSelfTest(const std::wstring& reportPath) {
     st.Reload(true);
     Check(true, L"配置可加载");
     (void)st.KeyCount();
+
+    // ---- 输出内存策略（真实控件上验证裁剪与批量追加）----
+    {
+        // 用一个隐藏的 EDIT 控件当"结果框"，验证 TrimEditToBudget 的行为。
+        // 顶层但不可见：--selftest 没有主窗口，WS_CHILD 找不到父窗口会失败
+        HWND edit = ::CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_OVERLAPPED | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
+            0, 0, 400, 300, nullptr, nullptr,
+            static_cast<HINSTANCE>(::GetModuleHandleW(nullptr)), nullptr);
+        if (!edit) {
+            Check(false, L"创建测试用 EDIT 控件");
+        } else {
+            // 批量追加：一次贴 2000 行，验证不会把事情搞崩
+            std::wstring chunk;
+            for (int i = 0; i < 20000; ++i) {
+                chunk += adb::Format(L"line %d abcdefghijklmnopqrstuvwxyz0123456789\r\n", i);
+            }
+            // EDIT 控件默认有 30000 字符上限，不显式放宽的话超出部分会被静默丢弃。
+            // 这正是"跑完命令结果框里只有一小段"的根因之一。
+            // 新建的 EDIT 默认只有 30000 字符容量，超出部分会被静默丢弃
+            Check(static_cast<int>(::SendMessageW(edit, EM_GETLIMITTEXT, 0, 0)) == 30000,
+                  L"EDIT 默认上限确实是 30000 字符");
+
+            RelaxEditLimit(edit);
+            Check(static_cast<int>(::SendMessageW(edit, EM_GETLIMITTEXT, 0, 0)) > 30000,
+                  L"RelaxEditLimit 放宽了上限");
+
+            AppendTextToEdit(edit, chunk);
+            int appended = ::GetWindowTextLengthW(edit);
+            Check(appended > 40000, L"放宽上限后能装下大量输出");
+
+            // 超出预算必须被裁掉
+            const size_t budget = 40000;
+            bool trimmed = TrimEditToBudget(edit, budget);
+            Check(trimmed, L"超出预算时执行裁剪");
+            int after = ::GetWindowTextLengthW(edit);
+            g_report += adb::Format(L"  [diag] 裁剪前=%d 预算=%zu 裁剪后=%d\r\n",
+                                    appended, budget, after);
+            Check(static_cast<size_t>(after) <= budget, L"裁剪后长度回到预算以内");
+
+            // 没超预算时不裁
+            Check(!TrimEditToBudget(edit, 10 * 1024 * 1024), L"未超预算时不裁剪");
+            ::DestroyWindow(edit);
+        }
+
+        // 批处理通道：大量行进去，占用始终有界
+        adb::BoundedText probe(256 * 1024, 4096);
+        for (int i = 0; i < 100000; ++i) probe.Append(L"stress line 0123456789abcdef");
+        Check(probe.PendingBytes() <= 256 * 1024, L"输出通道占用不超过预算");
+        Check(probe.DroppedBytes() > 0, L"超预算时记录了丢弃量");
+        Check(probe.TotalLines() == 100000u, L"累计行数统计正确");
+    }
 
     g_report += L"----------------------------------------\r\n";
     g_report += adb::Format(L"通过 %d 项，失败 %d 项\r\n", g_pass, g_fail);

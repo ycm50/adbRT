@@ -31,7 +31,20 @@ struct TaskOutcome {
     DWORD        exitCode = 0;
     std::wstring message;
     uint64_t     elapsedMs = 0;
+    size_t       droppedBytes = 0;   // 输出太多被丢弃的字节数（0 = 没丢）
 };
+
+// ---------------------------------------------------------------------------
+// 界面输出的内存策略（集中在这里，调参不用满仓库找）
+//
+// 运行结果框与实时日志共用同一套思路：
+//   生产端只往有界缓冲里写，永不阻塞；消费端按定时器批量取走；
+//   控件里保留的文本有字节上限，超了就裁掉最旧的一段。
+// ---------------------------------------------------------------------------
+constexpr UINT   kOutputTimerId    = 0xA17;          // 运行结果刷新定时器
+constexpr UINT   kOutputFlushMs    = 100;            // 批量刷新间隔
+constexpr size_t kOutputBatchBytes = 128 * 1024;     // 单次最多追加多少
+constexpr size_t kOutputBudgetBytes = 8 * 1024 * 1024;  // 结果框保留上限
 
 struct AppContext {
     std::wstring initialPath;      // 命令行传入的本地路径
@@ -85,7 +98,7 @@ struct AppState {
     std::vector<std::pair<std::string, HWND>> paramControls;
 
     adb::BuiltCommand preview;
-    std::wstring pendingOutput;
+    size_t lastDroppedNotified = 0;   // 上次已提示过的丢弃量，避免每 100ms 刷一次状态栏
 };
 
 extern AppState g_app;
@@ -112,7 +125,6 @@ void UpdatePreview();
 void CopyPreviewToClipboard(HWND hwnd);
 void SaveOutputToFile(HWND hwnd);
 void LayoutChildren(HWND hwnd);
-void SetStatus(const wchar_t* text);
 bool CollectInput(adb::BuildInput* in, std::wstring* error);
 void StartRun();
 void CancelRun();
@@ -122,10 +134,13 @@ void BuildParamPanel(HWND host, const adb::CommandSpec* spec);
 bool ReadParamPanel(adb::BuildInput* in, std::wstring* error);
 
 // 任务（task.cpp）
+void SetStatus(const wchar_t* text);          // 状态栏文字（定义在 task.cpp）
 void PostLine(int taskId, const std::wstring& line);
 void PostDone(int taskId, bool ok, bool cancelled, DWORD exitCode, const std::wstring& msg);
 void AppendOutput(const std::wstring& text);
 void ClearOutput();
+// 主线程批量把待投递的输出刷进结果框（定时器调用）
+void FlushOutput();
 
 // 对话框（settings_dialog.cpp）
 void ShowSettings(HWND parent);
@@ -141,7 +156,6 @@ void ShowDeviceList(HWND parent);
 void ShowDeviceInfo(HWND parent);
 void ShowInstalledApps(HWND parent);
 void ShowPullApk(HWND parent);
-void ShowFileBrowser(HWND parent);
 void ShowLogcat(HWND parent);
 void CaptureScreenshot(HWND parent);
 void OpenInteractiveShell(HWND parent);
@@ -152,6 +166,32 @@ void ShowTextViewAsync(HWND parent, const std::wstring& title, const std::wstrin
                        std::function<std::wstring()> loader);
 
 std::wstring AskFile(HWND parent, const wchar_t* title, const wchar_t* filter);
+// 多选文件：返回用 ";" 连接的绝对路径（取消返回空）
+std::wstring AskFilesMulti(HWND parent, const wchar_t* title, const wchar_t* filter);
 std::wstring AskFolder(HWND parent, const wchar_t* title);
+
+// 应用包选择器（带复选框，含系统应用）；确定时回调勾选的包名（可多个）
+// showSystemDefault=false 时"显示系统应用"默认不勾（卸载这类命令用）
+void ShowPackagePicker(HWND parent, bool showSystemDefault,
+                       std::function<void(const std::vector<std::wstring>&)> onDone);
+
+// 参数面板（param_panel.cpp）：返回这一条命令需要的面板高度（已按 DPI 缩放）
+int ParamPanelHeight();
+
+// 文件夹内文件复选（与"整个文件夹"互斥的那一半）
+void ShowFileChecklist(HWND parent, const std::wstring& folder, std::vector<std::wstring>* out);
+
+// 三段式 shell 命令编辑器（命令下拉 + 参数复选 + 参数值 + 管道）
+bool ShowShellPipelineEditor(HWND parent, std::wstring* text);
+
+// 系统属性多选
+bool ShowPropPicker(HWND parent, std::wstring* text);
+
+// 截图取点：点击 / 滑动都在截图上用鼠标完成
+void ShowShotPicker(HWND parent, const adb::CommandSpec* spec, std::wstring* out);
+
+// 局域网扫描：列出本机网段 → 扫描在线主机 → 标出开着 adb 端口的，
+// 选中后把 "IP:端口" 写回 out（返回 true 表示选了）
+bool ShowLanScanner(HWND parent, std::wstring* out);
 
 }  // namespace adbgui

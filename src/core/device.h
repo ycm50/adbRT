@@ -4,6 +4,7 @@
 //   exe 路径来自 Settings：支持相对目录 / 绝对目录 / 环境变量
 // ---------------------------------------------------------------------------
 
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -43,8 +44,12 @@ public:
 
 private:
     DeviceSession() = default;
-    std::wstring m_serial;
-    bool         m_serialLoaded = false;
+
+    // 后台线程（应用名称解析、logcat、扫描）也会读当前设备，
+    // 原来 m_serial / m_serialLoaded 完全没有保护 —— 并发读改写会撞车。
+    mutable std::mutex m_mu;
+    std::wstring       m_serial;
+    bool               m_serialLoaded = false;
 };
 
 }  // namespace adb

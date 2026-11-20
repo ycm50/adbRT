@@ -8,6 +8,11 @@
 #   2. 把安装目录写进「用户 PATH」（由 AdbRT.exe --install 完成，幂等）
 #   3. 创建桌面快捷方式（由 AdbRT.exe --install 完成）
 # 不创建、不修改、不删除任何注册表项。
+#
+# 不指定 -InstallDir 时，默认装到「当前工作目录所在盘的根目录\adbRT」
+# 例：在 A:\Downloads\adbRT 下执行 -> 装到 A:\adbRT。
+# 取的是 $PWD 的盘符根，而不是脚本自己所在的盘 —— 发布包经常被解压到
+# 别的盘（D:\下载\...），那样按脚本位置算就会装到意外的地方。
 # ---------------------------------------------------------------------------
 [CmdletBinding()]
 param(
@@ -25,7 +30,23 @@ function Ok([string]$text)   { Write-Host "    [OK] $text" -ForegroundColor Gree
 function Warn([string]$text) { Write-Host "    [!]  $text" -ForegroundColor Yellow }
 function Fail([string]$text) { Write-Host "    [X]  $text" -ForegroundColor Red; $script:fail++ }
 
-if ([string]::IsNullOrWhiteSpace($InstallDir)) { $InstallDir = $PWD.Path }
+# 脚本所在目录（仍在别处用于定位 app）
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+if ([string]::IsNullOrWhiteSpace($InstallDir)) {
+    # 默认：<当前工作目录所在盘>:\adbRT
+    # 用 $PWD 而不是脚本位置：脚本可能被解压到任意盘，用户实际站在哪个
+    # 工作空间里，就装到那块盘的根目录下。
+    $cwd = (Get-Location).Path
+    $driveRoot = [System.IO.Path]::GetPathRoot($cwd)
+    if ([string]::IsNullOrWhiteSpace($driveRoot)) {
+        # UNC 路径（\\server\share）没有盘符，退回到"当前目录下的 adbRT"
+        $InstallDir = Join-Path $cwd "adbRT"
+    } else {
+        $InstallDir = Join-Path $driveRoot "adbRT"
+    }
+    Write-Host "  未指定 -InstallDir，默认装到当前工作目录所在盘的根目录：$InstallDir" -ForegroundColor Gray
+}
 if (-not [System.IO.Path]::IsPathRooted($InstallDir)) {
     $InstallDir = Join-Path $PWD.Path $InstallDir
 }
@@ -37,7 +58,6 @@ Write-Host "  安装目录：$InstallDir"
 if ($DryRun) { Write-Host "  ** DRY RUN：不会修改任何东西 **" -ForegroundColor Yellow }
 Write-Host ""
 
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
 # 发布包里 install.ps1 与 app\ 同级；源码树里在 packaging\scripts\ 下
 $appDir = Join-Path $here "app"
 $root = $here
@@ -76,6 +96,12 @@ Step "复制文件"
 if ($DryRun) {
     Ok "（dry run）将复制 $appDir\* -> $InstallDir"
 } else {
+    # 装到发布包目录本身 / app 目录的子目录时，复制会变成"用自身覆盖项"
+    # 或"把容器复制到自己的子容器"，两个都会中途报错并留下半成品。
+    if ($InstallDir.TrimEnd("\") -eq $here.TrimEnd("\") -or $InstallDir -like "$appDir\*") {
+        Fail "安装目录不能是发布包目录本身或 app 目录的子目录（请换个位置，或删掉 app 内容后重新解压）"
+        exit 1
+    }
     Copy-Item -Path (Join-Path $appDir "*") -Destination $InstallDir -Recurse -Force
     foreach ($name in @("README.md","LICENSE","uninstall.ps1")) {
         $p = Join-Path $root $name

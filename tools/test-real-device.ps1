@@ -86,14 +86,14 @@ $pulled = Test-Path (Join-Path $pullDir "adbrt-push.txt")
 Write-Host "pull landed on disk: $pulled" -ForegroundColor $(if ($pulled) { "Green" } else { "Red" })
 if (-not $pulled) { $script:fail++ } else { $script:pass++ }
 
-Run-Case "input.key(HOME)" @("--run","input.key","--param","key=3") | Out-Null
+Run-Case "input.swipe" @("--run","input.swipe","--param","xys=640 1600 640 800","--param","dur=300") | Out-Null
 Run-Case "input.tap"      @("--run","input.tap","--param","xy=640 1200") | Out-Null
 Run-Case "input.swipe"    @("--run","input.swipe","--param","xys=640 1600 640 800 300") | Out-Null
 Run-Case "input.text"     @("--run","input.text","--param","text=adbrt") | Out-Null
 Run-Case "screencap"      @("--run","shell.run","--param","cmd=screencap -p /sdcard/adbrt-test/shot.png") | Out-Null
 Run-Case "screen.record(3s)" @("--run","screen.record","--flag","timelimit=3") | Out-Null
 
-Run-Case "file.delete"    @("--run","file.delete","--param","remote=/sdcard/adbrt-test") | Out-Null
+Run-Case "shell.getprop"  @("--run","shell.getprop","--param","prop=ro.product.model") | Out-Null
 
 [void]$script:results.Add("----------------------------------------")
 [void]$script:results.Add("pass $($script:pass) fail $($script:fail)")

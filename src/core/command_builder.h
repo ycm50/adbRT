@@ -47,5 +47,8 @@ bool IsValidHostPort(std::wstring_view s);
 bool IsValidPartitionName(std::wstring_view s);
 bool IsValidSerial(std::wstring_view s);
 bool IsValidCoords(std::wstring_view s, size_t expectCount);
+// 会被透传进设备侧 shell 的参数：先过这一关
+bool HasShellMeta(std::wstring_view s);
+bool IsAllDigits(std::wstring_view s);
 
 }  // namespace adb

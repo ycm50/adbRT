@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "../core/adb_runner.h"
+#include "../core/bounded_text.h"
 #include "../core/command_builder.h"
 #include "../core/device.h"
 #include "../core/parsers.h"
@@ -15,16 +16,44 @@
 
 namespace adbgui {
 
+// ---------------------------------------------------------------------------
+// 运行结果的内存策略
+//
+// 原来：每输出一行就 PostMessage 一次，主线程收到就 EM_REPLACESEL 追加，
+// 再 ScrollToEnd（内部是 EM_SETSEL 0,-1 全选）—— 输出越多越慢，
+// EDIT 里的文本还完全没有上限。logcat 这种高频输出直接把消息队列打爆。
+//
+// 现在：
+//   · 工作线程把行写进有界的 BoundedText（超预算丢最旧的一半并记账）
+//   · 主线程用 100ms 定时器批量取走，一次只做一次追加
+//   · EDIT 自身也按字节预算裁剪，避免控件内部无限长
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 待投递缓冲的预算：比 UI 的显示预算大一些，允许一个刷新周期内积压
+constexpr size_t kPendingBudget = 2 * 1024 * 1024;
+
+adb::BoundedText& Pending() {
+    static adb::BoundedText buf(kPendingBudget, adb::kMaxLineBytes);
+    return buf;
+}
+
+// 工作线程把行塞进来；主线程用定时器取走
+void PushLine(int taskId, const std::wstring& line) {
+    (void)taskId;
+    Pending().Append(line);
+}
+
+}  // namespace
+
 void PostLine(int taskId, const std::wstring& line) {
-    auto* heap = new std::wstring(line);
-    if (!::PostMessageW(g_app.hwnd, WM_APP_TASK_LINE, static_cast<WPARAM>(taskId),
-                        reinterpret_cast<LPARAM>(heap))) {
-        delete heap;
-    }
+    // 保留原接口：内部改成写入有界缓冲，不再一行一次 PostMessage
+    PushLine(taskId, line);
 }
 
 void PostDone(int taskId, bool ok, bool cancelled, DWORD exitCode, const std::wstring& msg) {
-    auto* outcome = new TaskOutcome{ok, cancelled, exitCode, msg, 0};
+    auto* outcome = new TaskOutcome{ok, cancelled, exitCode, msg, 0, 0};
     if (!::PostMessageW(g_app.hwnd, WM_APP_TASK_DONE, static_cast<WPARAM>(taskId),
                         reinterpret_cast<LPARAM>(outcome))) {
         delete outcome;
@@ -32,12 +61,47 @@ void PostDone(int taskId, bool ok, bool cancelled, DWORD exitCode, const std::ws
 }
 
 void ClearOutput() {
+    Pending().Clear();
     SetTextOf(g_app.hOutput, L"");
 }
 
 void AppendOutput(const std::wstring& text) {
     AppendTextToEdit(g_app.hOutput, text);
     ScrollToEnd(g_app.hOutput);
+}
+
+// 主线程批量刷新：循环取走积压（每次最多 kOutputBatchBytes），最后只滚一次屏。
+// 原来只取一批就返回，进程结束得比刷新快时剩下的输出就永远留在缓冲里
+// —— 表现为"跑得快的命令结果只显示了一小段"。
+void FlushOutput() {
+    adb::BoundedText& pending = Pending();
+    if (pending.PendingBytes() == 0) return;
+
+    bool appended = false;
+    bool trimmed = false;
+    // 一帧内最多搬 kOutputBudgetBytes，避免一次刷新把 UI 卡住
+    size_t moved = 0;
+    while (pending.PendingBytes() > 0 && moved < kOutputBudgetBytes) {
+        std::wstring batch = pending.TakeBatch(kOutputBatchBytes);
+        if (batch.empty()) break;
+        moved += batch.size();
+        AppendTextToEdit(g_app.hOutput, batch);
+        appended = true;
+        if (TrimEditToBudget(g_app.hOutput, kOutputBudgetBytes)) trimmed = true;
+    }
+
+    if (appended) {
+        // 裁剪后原来的滚动位置失效，直接跳到新的尾部
+        if (trimmed) ScrollToEnd(g_app.hOutput);
+        else         FollowTailIfAtBottom(g_app.hOutput);
+    }
+
+    const size_t dropped = pending.DroppedBytes();
+    if (dropped != 0 && dropped != g_app.lastDroppedNotified) {
+        g_app.lastDroppedNotified = dropped;
+        SetStatus(adb::Format(L"输出过多，已丢弃较早的 %zu 字（结果框保留上限 %zu MiB）",
+                              dropped, kOutputBudgetBytes / (1024 * 1024)).c_str());
+    }
 }
 
 void SetStatus(const wchar_t* text) {
@@ -62,14 +126,14 @@ DWORD WINAPI WorkerProc(LPVOID param) {
     for (const auto& argv : arg->argvList) {
         if (g_app.cancelFlag.load()) { allOk = false; break; }
 
-        PostLine(arg->taskId, L"> " + adb::BuildCommandLineForLog(arg->exe, argv));
+        PushLine(arg->taskId, L"> " + adb::BuildCommandLineForLog(arg->exe, argv));
 
         adb::RunOptions opts;
         opts.cancel = &g_app.cancelFlag;
         opts.sink = [&](const std::string& line, bool isStderr) -> bool {
             std::wstring w = adb::Utf8ToWide(line);
             if (isStderr) w = L"[err] " + w;
-            PostLine(arg->taskId, w);
+            PushLine(arg->taskId, w);
             int pct = adb::ParseProgressPercent(w);
             if (pct >= 0) {
                 ::PostMessageW(g_app.hwnd, WM_APP_TASK_PROGRESS,
@@ -82,14 +146,14 @@ DWORD WINAPI WorkerProc(LPVOID param) {
         elapsed += r.elapsedMs;
         lastExit = r.exitCode;
         if (!r.started) {
-            PostLine(arg->taskId, L"[错误] " + r.error);
+            PushLine(arg->taskId, L"[错误] " + r.error);
             allOk = false;
         } else if (r.cancelled) {
             allOk = false;
         } else if (r.exitCode != 0) {
             allOk = false;
             std::wstring explain = adb::ExplainAdbError(r.ErrW() + L"\n" + r.OutW());
-            if (!explain.empty()) PostLine(arg->taskId, L"[提示] " + explain);
+            if (!explain.empty()) PushLine(arg->taskId, L"[提示] " + explain);
         }
     }
 
@@ -165,6 +229,7 @@ void StartRun() {
         return;
     }
     ::CloseHandle(th);
+    ::SetTimer(g_app.hwnd, kOutputTimerId, kOutputFlushMs, nullptr);
 }
 
 void CancelRun() {

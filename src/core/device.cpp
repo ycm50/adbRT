@@ -1,6 +1,7 @@
 #include "device.h"
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace adb {
 
@@ -33,27 +34,42 @@ std::vector<DeviceEntry> DeviceSession::ListFastboot() {
 }
 
 std::wstring DeviceSession::CurrentSerial() {
-    if (!m_serialLoaded) {
-        m_serial = Settings::Instance().CurrentDevice();
-        m_serialLoaded = true;
+    {
+        std::lock_guard<std::mutex> lk(m_mu);
+        if (!m_serialLoaded) {
+            m_serial = Settings::Instance().CurrentDevice();
+            m_serialLoaded = true;
+        }
+        if (!m_serial.empty()) return m_serial;
     }
-    if (!m_serial.empty()) return m_serial;
 
+    // 自动选中只在线程外做一次；ListAdb 会起进程，不能持锁调用
     auto devices = ListAdb();
     std::vector<DeviceEntry> online;
     for (const auto& d : devices)
         if (d.state == DeviceState::Device) online.push_back(d);
-    if (online.size() == 1) {
-        m_serial = online.front().serial;
-        Settings::Instance().SetCurrentDevice(m_serial);
-        Settings::Instance().Save();
+    if (online.size() != 1) {
+        std::lock_guard<std::mutex> lk(m_mu);
+        return m_serial;
     }
-    return m_serial;
+
+    std::wstring tentative = online.front().serial;
+    {
+        std::lock_guard<std::mutex> lk(m_mu);
+        if (!m_serial.empty()) return m_serial;   // 别的线程抢先定了
+        m_serial = tentative;
+    }
+    Settings::Instance().SetCurrentDevice(tentative);
+    Settings::Instance().Save();
+    return tentative;
 }
 
 void DeviceSession::SetCurrentSerial(const std::wstring& serial) {
-    m_serial = serial;
-    m_serialLoaded = true;
+    {
+        std::lock_guard<std::mutex> lk(m_mu);
+        m_serial = serial;
+        m_serialLoaded = true;
+    }
     Settings::Instance().SetCurrentDevice(serial);
     Settings::Instance().Save();
 }
@@ -84,13 +100,32 @@ std::wstring DeviceSession::Shell(const std::wstring& cmd, uint32_t timeoutMs) {
 }
 
 std::vector<PackageEntry> DeviceSession::InstalledPackages(bool includeSystem) {
-    std::vector<std::wstring> args = {L"shell", L"pm", L"list", L"packages"};
-    if (!includeSystem) { args.push_back(L"-3"); }
+    // 只要第三方时直接 -3；要全量时再补一次 -3 用来标记哪些是系统应用
+    std::vector<std::wstring> base = {L"shell", L"pm", L"list", L"packages"};
     RunOptions o;
     o.timeoutMs = 30000;
-    auto r = RunProcess(AdbExe(), WithSerial(args), o);
-    if (!r.started) return {};
-    return ParsePackageList(r.OutW());
+
+    if (!includeSystem) {
+        auto r = RunProcess(AdbExe(), WithSerial({L"shell", L"pm", L"list", L"packages", L"-3"}), o);
+        if (!r.started) return {};
+        return ParsePackageList(r.OutW());
+    }
+
+    auto all = RunProcess(AdbExe(), WithSerial(base), o);
+    if (!all.started) return {};
+    auto thirdParty = RunProcess(AdbExe(),
+                                 WithSerial({L"shell", L"pm", L"list", L"packages", L"-3"}), o);
+
+    // 用哈希集合判定"是不是第三方"：原来是每个包都对整个 third 列表
+    // 做一次线性 find，包多的时候就是 O(n²)，列表窗口一开就肉眼可见地卡。
+    std::unordered_set<std::wstring> third;
+    for (const auto& p : ParsePackageList(thirdParty.OutW())) third.insert(p.package);
+
+    std::vector<PackageEntry> out = ParsePackageList(all.OutW());
+    for (auto& p : out) {
+        p.system = third.find(p.package) == third.end();
+    }
+    return out;
 }
 
 std::vector<std::wstring> DeviceSession::Partitions() {
@@ -111,10 +146,15 @@ std::wstring DeviceSession::DeviceSummary() {
 }
 
 std::vector<std::wstring> DeviceSession::WithSerial(const std::vector<std::wstring>& args) const {
-    if (m_serial.empty()) return args;
+    std::wstring serial;
+    {
+        std::lock_guard<std::mutex> lk(m_mu);
+        serial = m_serial;
+    }
+    if (serial.empty()) return args;
     std::vector<std::wstring> out;
     out.push_back(L"-s");
-    out.push_back(m_serial);
+    out.push_back(serial);
     out.insert(out.end(), args.begin(), args.end());
     return out;
 }

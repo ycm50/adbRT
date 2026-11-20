@@ -4,6 +4,7 @@ set(ADB_GUI_SOURCES
   main_window.cpp
   cli.cpp
   reports.cpp
+  pkg_picker.cpp
   theme.cpp
   param_panel.cpp
   task.cpp
@@ -14,6 +15,7 @@ set(ADB_GUI_SOURCES
   dialogs.cpp
   builtin.cpp
   windows2.cpp
+  pick_windows.cpp
 )
 
 # 图标与版本资源：app.rc 里的图标路径在构建期注入绝对路径
@@ -36,7 +38,7 @@ target_include_directories(AdbRT PRIVATE
 
 target_link_libraries(AdbRT PRIVATE
   adbrt_core
-  comctl32 comdlg32 ole32 shell32 shlwapi uuid)
+  comctl32 comdlg32 ole32 shell32 shlwapi uuid gdiplus)
 
 target_compile_definitions(AdbRT PRIVATE _CRT_SECURE_NO_WARNINGS)
 
