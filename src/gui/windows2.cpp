@@ -139,7 +139,7 @@ LRESULT CALLBACK LogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 reinterpret_cast<HMENU>(IDC_BTN_PAUSE), nullptr, nullptr);
             HWND save = ::CreateWindowExW(0, L"BUTTON", L"保存…",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd,
-                reinterpret_cast<HMENU>(IDC_BTN_SAVE), nullptr, nullptr);
+                reinterpret_cast<HMENU>(IDC_BTN_SAVELOG), nullptr, nullptr);
             HWND clearBtn = ::CreateWindowExW(0, L"BUTTON", L"清空",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd,
                 reinterpret_cast<HMENU>(IDC_BTN_ACTION2), nullptr, nullptr);
@@ -156,7 +156,7 @@ LRESULT CALLBACK LogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int w = LOWORD(lp), h = HIWORD(lp);
             ::MoveWindow(ctx->filterEdit, 4, 4, w - 200, 24, TRUE);
             ::MoveWindow(ctx->pauseBtn, w - 190, 4, 60, 24, TRUE);
-            ::MoveWindow(::GetDlgItem(hwnd, IDC_BTN_SAVE), w - 126, 4, 60, 24, TRUE);
+            ::MoveWindow(::GetDlgItem(hwnd, IDC_BTN_SAVELOG), w - 126, 4, 60, 24, TRUE);
             ::MoveWindow(::GetDlgItem(hwnd, IDC_BTN_ACTION2), w - 62, 4, 58, 24, TRUE);
             ::MoveWindow(ctx->edit, 4, 32, w - 8, h - 40, TRUE);
             return 0;
@@ -179,7 +179,7 @@ LRESULT CALLBACK LogProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 SetTextOf(ctx->edit, L"");
                 return 0;
             }
-            if (id == IDC_BTN_SAVE) {
+            if (id == IDC_BTN_SAVELOG) {
                 std::wstring dir = adb::Settings::Instance().DownloadDir();
                 adb::EnsureDirectory(dir);
                 std::wstring file = adb::JoinPath(dir, L"logcat-" + adb::NowStamp() + L".txt");

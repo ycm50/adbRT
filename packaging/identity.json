@@ -3,7 +3,7 @@
   "productName": "AdbRT",
   "exeName": "AdbRT.exe",
   "companyName": "AdbRT",
-  "version": "0.1.0.0",
+  "version": "1.0.0.0",
   "description": "Android 平台工具（adb / fastboot）图形外壳",
   "minOsVersion": "10.0.17763.0"
 }
